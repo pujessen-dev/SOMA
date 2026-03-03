@@ -22,9 +22,7 @@ class AbstractSandbox(ABC):
         self.command = command
         if created_at is None:
             created_at = datetime.now(timezone.utc)
-        elif created_at.tzinfo is None:
-            # Naive datetimes are ambiguous across servers in different time zones.
-            # Treat them as UTC to keep behavior deterministic.
+        elif created_at.tzinfo is None or created_at.tzinfo.utcoffset(created_at) is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
         else:
             created_at = created_at.astimezone(timezone.utc)
