@@ -48,6 +48,7 @@ from soma_shared.db.models.validator import Validator
 from soma_shared.db.models.validator_registration import ValidatorRegistration
 from soma_shared.db.session import get_db_session
 from app.core.config import settings
+from app.api.routes.utils import _get_current_burn_state
 import logging
 
 logger = logging.getLogger(__name__)
@@ -427,8 +428,7 @@ async def frontend_summary(
         .where(CompetitionChallenge.is_active.is_(True))
     )
 
-    burn_active = bool(getattr(request.app.state, "burn", False))
-    burn_ratio = float(getattr(request.app.state, "burn_ratio", 1.0))
+    burn_active, burn_ratio = await _get_current_burn_state(db)
 
     response = FrontendSummaryResponse(
         server_ts=datetime.now(timezone.utc),

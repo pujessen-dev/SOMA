@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_script_storage
+from app.api.deps import get_script_storage, verify_miner_request_dep_tz
 from soma_shared.contracts.common.signatures import SignedEnvelope
 from soma_shared.contracts.miner.v1.messages import (
     UploadSolutionRequest,
@@ -25,7 +25,6 @@ from app.services.blob.script_storage import ScriptStorage
 from app.services.script_store import store_hot_script
 from soma_shared.utils.signer import generate_nonce, sign_payload_model
 from app.core.config import settings
-from soma_shared.utils.verifier import verify_miner_request_dep
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +251,7 @@ async def _ensure_single_upload_for_competition(
 async def upload_miner_script(
     request: Request,
     _req: SignedEnvelope[UploadSolutionRequest] = Depends(
-        verify_miner_request_dep(UploadSolutionRequest)
+        verify_miner_request_dep_tz(UploadSolutionRequest)
     ),
     db: AsyncSession = Depends(get_db_session),
     storage: ScriptStorage = Depends(get_script_storage),
@@ -394,7 +393,11 @@ async def upload_miner_script(
 
     response_payload = UploadSolutionResponse(ok=True)
     response_nonce = generate_nonce()
-    response_sig = sign_payload_model(response_payload, nonce=response_nonce)
+    response_sig = sign_payload_model(
+        response_payload,
+        nonce=response_nonce,
+        wallet=settings.wallet,
+    )
     response = SignedEnvelope(payload=response_payload, sig=response_sig)
     logger.info(
         "miner_upload_response",

@@ -50,7 +50,8 @@ from app.services.sandbox.remote_sandbox_manager import RemoteSandboxManager
 from app.services.blob.s3 import S3BlobStorage
 from app.services.blob.compressed_text_storage import CompressedTextStorage
 from soma_shared.utils.signer import generate_nonce, sign_payload_model
-from soma_shared.utils.verifier import verify_request_dep, verify_validator_stake_dep
+from soma_shared.utils.verifier import verify_validator_stake_dep
+from app.api.deps import verify_request_dep_tz
 from app.core.config import settings
 from app.api.routes.utils import (
     _get_request_row,
@@ -60,6 +61,7 @@ from app.api.routes.utils import (
     _get_active_competition_id,
     _get_screener_challenges,
     _get_ratio_count,
+    _get_current_burn_state,
     _is_compressed_enough,
     fetch_miner_challenge_code,
 )
@@ -103,7 +105,7 @@ def _get_sandbox_manager(request: Request) -> RemoteSandboxManager:
 async def register(
     request: Request,
     _req: SignedEnvelope[ValidatorRegisterRequest] = Depends(
-        verify_request_dep(ValidatorRegisterRequest)
+        verify_request_dep_tz(ValidatorRegisterRequest)
     ),
     db: AsyncSession = Depends(get_db_session),
     _stake_check: None = Depends(
@@ -248,7 +250,7 @@ async def register(
 async def request_challenge(
     request: Request,
     _req: SignedEnvelope[GetChallengesRequest] = Depends(
-        verify_request_dep(GetChallengesRequest)
+        verify_request_dep_tz(GetChallengesRequest)
     ),
     db: AsyncSession = Depends(get_db_session),
     _stake_check: None = Depends(
@@ -634,7 +636,7 @@ async def request_challenge(
 async def score_challenges(
     request: Request,
     _req: SignedEnvelope[PostChallengeScores] = Depends(
-        verify_request_dep(PostChallengeScores)
+        verify_request_dep_tz(PostChallengeScores)
     ),
     db: AsyncSession = Depends(get_db_session),
     _stake_check: None = Depends(
@@ -954,7 +956,7 @@ async def score_challenges(
 async def get_best_miners(
     request: Request,
     _req: SignedEnvelope[GetBestMinersUidRequest] = Depends(
-        verify_request_dep(GetBestMinersUidRequest)
+        verify_request_dep_tz(GetBestMinersUidRequest)
     ),
     db: AsyncSession = Depends(get_db_session),
 ) -> SignedEnvelope[GetBestMinersUidResponse]:
@@ -1166,8 +1168,7 @@ async def get_best_miners(
                         exc_info=exc,
                     )
 
-                burn_ratio = float(getattr(request.app.state, "burn_ratio", 1.0))
-                burn_ratio = max(0.0, min(1.0, burn_ratio))
+                _, burn_ratio = await _get_current_burn_state(db)
                 per_miner_setting = float(
                     getattr(settings, "screener_weight_per_miner", 0.0)
                 )
