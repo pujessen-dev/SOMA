@@ -42,9 +42,18 @@ class SandboxExecutor:
             self._docker_client = docker.from_env()
         return self._docker_client
     
-    def ensure_image(self) -> None:
-        """Ensure sandbox Docker image exists, build if needed."""
-        if not self.auto_build:
+    def ensure_image(self, force_rebuild: bool = False) -> None:
+        """Ensure sandbox Docker image exists, build if needed.
+        
+        Args:
+            force_rebuild: If True, rebuild image even if it exists
+        """
+        if not self.auto_build and not force_rebuild:
+            return
+        
+        if force_rebuild:
+            logger.info("Force rebuild requested for sandbox image %s", self.image)
+            self.build_image()
             return
             
         try:
@@ -53,9 +62,9 @@ class SandboxExecutor:
             logger.info("Sandbox image %s already exists", self.image)
         except docker.errors.ImageNotFound:
             logger.info("Sandbox image %s not found, building...", self.image)
-            self._build_image()
+            self.build_image()
     
-    def _build_image(self) -> None:
+    def build_image(self) -> None:
         """Build sandbox Docker image."""
         # Image directory is in sandbox_service/sandbox_image/
         image_dir = Path(__file__).parent.parent / "sandbox_image"

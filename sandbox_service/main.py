@@ -42,9 +42,12 @@ def get_sandbox_executor() -> SandboxExecutor:
     """Get or create sandbox executor instance."""
     if not hasattr(app.state, "sandbox_executor"):
         image = os.getenv("SANDBOX_IMAGE", "sandbox-runner:local")
+        force_rebuild = os.getenv("SANDBOX_FORCE_REBUILD", "false").lower() == "true"
         app.state.sandbox_executor = SandboxExecutor(image=image, auto_build=True)
-        # Ensure image is built on startup
-        app.state.sandbox_executor.ensure_image()
+        # Ensure image is built on startup (force rebuild if flag is set)
+        app.state.sandbox_executor.ensure_image(force_rebuild=force_rebuild)
+        if force_rebuild:
+            logger.info("Sandbox image force rebuild completed")
     return app.state.sandbox_executor
 
 
