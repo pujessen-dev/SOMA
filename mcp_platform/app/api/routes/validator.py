@@ -58,6 +58,7 @@ from app.api.routes.utils import (
     _get_active_competition_id,
     _get_screener_challenges,
     _get_ratio_count,
+    _get_current_burn_state,
     _is_compressed_enough,
     fetch_miner_challenge_code,
 )
@@ -1148,8 +1149,7 @@ async def get_best_miners(
                         exc_info=exc,
                     )
 
-                burn_ratio = float(getattr(request.app.state, "burn_ratio", 1.0))
-                burn_ratio = max(0.0, min(1.0, burn_ratio))
+                _, burn_ratio = await _get_current_burn_state(db)
                 per_miner_setting = float(
                     getattr(settings, "screener_weight_per_miner", 0.0)
                 )

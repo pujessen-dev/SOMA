@@ -16,7 +16,6 @@ from soma_shared.db.session import init_db, close_db, get_db_session, clear_db
 from app.db.mock_data import seed_debug_data
 from soma_shared.db.models.validator import Validator
 from soma_shared.db.models.validator_registration import ValidatorRegistration
-from soma_shared.db.models.burn_request import BurnRequest
 from app.api.routes import api_router
 from soma_shared.utils.signer import get_wallet_from_settings
 from app.services.heartbeat import start_heartbeat_thread, stop_heartbeat_thread
@@ -163,34 +162,6 @@ def create_app() -> FastAPI:
                 except BaseException as exc:
                     _log_startup_failure("seed_debug_data", exc)
                     raise
-            app.state.burn = False
-            app.state.burn_ratio = 1.0
-            logger.info("burn_state_initialized", extra={"burn_active": False})
-        else:
-            # Initialize burn state from database
-            try:
-                async for session in get_db_session():
-                    result = await session.execute(
-                        select(BurnRequest)
-                        .order_by(BurnRequest.created_at.desc())
-                        .limit(1)
-                    )
-                    latest_burn = result.scalars().first()
-                    if latest_burn:
-                        app.state.burn = latest_burn.is_active
-                        app.state.burn_ratio = latest_burn.burn_ratio
-                    else:
-                        app.state.burn = True
-                        app.state.burn_ratio = 1.0
-                    logger.info(
-                        "burn_state_initialized",
-                        extra={"burn_active": app.state.burn},
-                    )
-                    break
-            except Exception:
-                logger.warning("burn_state_init_failed, defaulting to False")
-                app.state.burn = False
-                app.state.burn_ratio = 1.0
         try:
             app.state.metagraph_service = MetagraphService()
             app.state.metagraph_runner = MetagraphServiceRunner(
