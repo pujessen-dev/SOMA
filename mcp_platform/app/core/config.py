@@ -120,6 +120,16 @@ class Settings(BaseSettings):
         alias="MIN_VALIDATOR_STAKE",
     )
 
+    # Remote sandbox service configuration (required)
+    sandbox_service_url: str = Field(
+        ...,
+        alias="SANDBOX_SERVICE_URL",
+    )
+    sandbox_service_timeout: float = Field(
+        default=120.0,
+        alias="SANDBOX_SERVICE_TIMEOUT",
+    )
+
     @field_validator("log_levels", mode="before")
     @classmethod
     def _parse_log_levels(cls, value: Any) -> dict[str, str]:
