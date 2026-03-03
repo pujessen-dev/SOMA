@@ -28,6 +28,7 @@ from soma_shared.db.models.competition_timeframe import CompetitionTimeframe
 from soma_shared.db.models.compression_competition_config import (
     CompressionCompetitionConfig,
 )
+from soma_shared.db.models.burn_request import BurnRequest
 from soma_shared.db.models.screener import Screener
 from soma_shared.db.models.screening_challenge import ScreeningChallenge
 from soma_shared.db.validator_log import log_validator_message
@@ -114,6 +115,30 @@ async def _get_active_competition_id(db: AsyncSession) -> int | None:
         .order_by(Competition.created_at.desc())
         .limit(1)
     )
+
+
+async def _get_current_burn_state(db: AsyncSession) -> tuple[bool, float]:
+    default_ratio = 1.0
+    default_active_no_row = False if settings.debug else True
+    default_active_on_error = False
+    try:
+        result = await db.execute(
+            select(BurnRequest).order_by(BurnRequest.created_at.desc()).limit(1)
+        )
+    except Exception as exc:
+        logger.warning(
+            "burn_state_load_failed",
+            extra={"error": str(exc)},
+            exc_info=exc,
+        )
+        return default_active_on_error, default_ratio
+
+    latest_burn = result.scalars().first()
+    if latest_burn is None:
+        return default_active_no_row, default_ratio
+
+    burn_ratio = max(0.0, min(1.0, float(latest_burn.burn_ratio)))
+    return bool(latest_burn.is_active), burn_ratio
 
 
 async def _get_competition_phase(
