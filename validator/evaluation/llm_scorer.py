@@ -190,17 +190,7 @@ class Scoring:
             exact = self._round_score(exact_raw)
             f1 = self._round_score(f1_raw)
             score = self._round_score(score_raw)
-            details.append(
-                {
-                    "index": idx,
-                    "question": questions[idx],
-                    "expected": expected,
-                    "actual": actual,
-                    "exact_match": exact,
-                    "f1": f1,
-                    "score": score,
-                }
-            )
+            details.append({"reason": "No answer provided"} if model_answers[idx] == "" else {"reason": "Answered"})
             scores.append(score)
 
         overall = self._round_score(sum(scores) / len(scores) if scores else 0.0)

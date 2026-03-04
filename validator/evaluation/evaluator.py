@@ -52,10 +52,14 @@ class Evaluator(AbstractEvaluator):
             for index, challenge in enumerate(tasks_list):
                 try:
                     compressed_text = getattr(challenge, "compressed_text", None)
+                    if compressed_text is None:
+                        raise ValueError("challenge.compressed_text is None")
                     if not isinstance(compressed_text, str):
                         raise ValueError(
                             f"challenge.compressed_text must be str, got {type(compressed_text)}"
                         )
+                    if compressed_text.strip() == "":
+                        raise ValueError("challenge.compressed_text is empty or whitespace")
 
                     # Extract questions and answers from challenge_questions
                     questions = [qa.question for qa in challenge.challenge_questions]
