@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI
 from dotenv import load_dotenv
-from app.contracts import (
+from soma_shared.contracts.sandbox.v1.messages import (
     ExecuteBatchRequest,
     ExecuteBatchResponse,
 )
