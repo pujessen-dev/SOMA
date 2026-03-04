@@ -452,17 +452,21 @@ async def frontend_summary(
     return response
 
 
-@router.get("/miners", response_model=MinersListResponse)
+@router.get(
+    "/miners",
+    response_model=MinersListResponse,
+    description=(
+        "Return paginated miners who uploaded a script in the latest active "
+        "competition only."
+    ),
+)
 async def list_miners(
     db: AsyncSession = Depends(get_db_session),
     _: None = Depends(_require_private_network),
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=200),
 ) -> MinersListResponse:
-    total = await db.scalar(select(func.count()).select_from(Miner))
-    total_value = int(total or 0)
-    total_pages = max(1, ceil(total_value / limit)) if total_value else 1
-    offset = (page - 1) * limit
+    """List only miners that uploaded a script in the latest active competition."""
 
     last_submit_subq = (
         select(
@@ -540,6 +544,11 @@ async def list_miners(
         .group_by(Script.miner_fk)
         .subquery()
     )
+
+    total = await db.scalar(select(func.count()).select_from(has_script_subq))
+    total_value = int(total or 0)
+    total_pages = max(1, ceil(total_value / limit)) if total_value else 1
+    offset = (page - 1) * limit
 
     # Calculate average score and challenge counts from the latest active competition
     # EXCLUDING screener challenges
@@ -804,7 +813,7 @@ async def list_miners(
         active_competition_score_subq,
         active_competition_score_subq.c.miner_fk == Miner.id,
     )
-    query = query.outerjoin(has_script_subq, has_script_subq.c.miner_fk == Miner.id)
+    query = query.join(has_script_subq, has_script_subq.c.miner_fk == Miner.id)
     query = query.outerjoin(
         screener_score_subq, screener_score_subq.c.miner_fk == Miner.id
     )
