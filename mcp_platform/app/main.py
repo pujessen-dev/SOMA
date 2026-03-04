@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
-import traceback
 import uuid
+from urllib.parse import urlsplit
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -27,6 +27,52 @@ from app.services.metagraph import MetagraphService
 from app.services.metagraph_runner import MetagraphServiceRunner
 
 logger = logging.getLogger(__name__)
+
+
+def _iter_exception_chain(exc: BaseException):
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        yield current
+        seen.add(id(current))
+        next_exc = (
+            current.__cause__
+            if current.__cause__ is not None
+            else current.__context__
+        )
+        current = next_exc if isinstance(next_exc, BaseException) else None
+
+
+def _is_db_connectivity_error(exc: BaseException) -> bool:
+    connectivity_types = (TimeoutError, ConnectionError, OSError, DBAPIError, OperationalError)
+    for chain_exc in _iter_exception_chain(exc):
+        if isinstance(chain_exc, connectivity_types):
+            return True
+        msg = str(chain_exc).lower()
+        if "connect" in msg and (
+            "timeout" in msg
+            or "refused" in msg
+            or "unreachable" in msg
+            or "network" in msg
+        ):
+            return True
+    return False
+
+
+def _db_target_from_dsn(dsn: str | None) -> dict[str, object]:
+    if not dsn:
+        return {}
+    try:
+        parsed = urlsplit(dsn)
+    except Exception:
+        return {}
+    db_name = parsed.path.lstrip("/") or None
+    return {
+        "db_scheme": parsed.scheme or None,
+        "db_host": parsed.hostname,
+        "db_port": parsed.port,
+        "db_name": db_name,
+    }
 
 
 def create_app() -> FastAPI:
@@ -96,14 +142,30 @@ def create_app() -> FastAPI:
             extra={"count": len(validators)},
         )
 
-    def _log_startup_failure(step: str, exc: BaseException) -> None:
+    def _log_startup_failure(
+        step: str,
+        exc: BaseException,
+        *,
+        include_traceback: bool = True,
+        event: str = "startup_failed",
+        extra: dict[str, object] | None = None,
+    ) -> None:
         configure_logging(
             settings.log_level,
             settings.log_levels,
             include_extras=settings.log_include_extras,
         )
-        logger.exception("startup_failed", extra={"step": step})
-        traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+        log_extra: dict[str, object] = {
+            "step": step,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+        if extra:
+            log_extra.update(extra)
+        if include_traceback:
+            logger.exception(event, extra=log_extra)
+        else:
+            logger.error(event, extra=log_extra)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -131,12 +193,15 @@ def create_app() -> FastAPI:
         from app.api.routes.utils import _get_nlp
 
         _get_nlp()
+        dsn: str | None = None
+        db_target: dict[str, object] = {}
         try:
             dsn = settings.get_postgres_dsn()
             if not dsn:
                 raise RuntimeError(
                     "Database DSN not configured (set POSTGRES_DSN or RDS_SECRET_ID)"
                 )
+            db_target = _db_target_from_dsn(dsn)
             await init_db(
                 dsn=dsn,
                 echo=settings.db_echo,
@@ -144,6 +209,17 @@ def create_app() -> FastAPI:
                 max_overflow=settings.db_max_overflow,
             )
         except BaseException as exc:
+            if _is_db_connectivity_error(exc):
+                _log_startup_failure(
+                    "init_db",
+                    exc,
+                    include_traceback=False,
+                    event="database_connection_unavailable",
+                    extra=db_target,
+                )
+                raise RuntimeError(
+                    "Database connection unavailable during startup."
+                ) from None
             _log_startup_failure("init_db", exc)
             raise
 

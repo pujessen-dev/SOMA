@@ -158,6 +158,15 @@ class SandboxExecutor:
             output_dir = tmp_path / "output"
             input_dir.mkdir(parents=True, exist_ok=True)
             output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                # Container runs as uid/gid 65534; make bind mount writable.
+                output_dir.chmod(0o777)
+            except OSError as exc:
+                logger.warning(
+                    "Failed to chmod output dir %s: %s",
+                    output_dir,
+                    exc,
+                )
             
             # Write input files
             (input_dir / "code.py").write_text(challenge_code)
