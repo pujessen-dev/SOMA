@@ -46,9 +46,12 @@ from app.services.challenge_factory import (
     create_challenge_batch,
     get_qa_pairs_for_challenge,
 )
-from app.services.sandbox.sandbox_manager import SandboxManager
+from app.services.sandbox.remote_sandbox_manager import RemoteSandboxManager
+from app.services.blob.s3 import S3BlobStorage
+from app.services.blob.compressed_text_storage import CompressedTextStorage
 from soma_shared.utils.signer import generate_nonce, sign_payload_model
-from soma_shared.utils.verifier import verify_request_dep, verify_validator_stake_dep
+from soma_shared.utils.verifier import verify_validator_stake_dep
+from app.api.deps import verify_request_dep_tz
 from app.core.config import settings
 from app.api.routes.utils import (
     _get_request_row,
@@ -67,12 +70,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["validator"])
 
 
-def _get_sandbox_manager(request: Request) -> SandboxManager:
+def _get_sandbox_manager(request: Request) -> RemoteSandboxManager:
+    """Get or create remote sandbox manager instance."""
     sandbox_manager = getattr(request.app.state, "sandbox_manager", None)
     if sandbox_manager is None:
-        sandbox_manager = SandboxManager(
-            default_ttl=timedelta(seconds=settings.sandbox_container_ttl_seconds),
-            exec_timeout_seconds=settings.sandbox_exec_timeout_seconds,
+        if not settings.sandbox_service_url:
+            raise RuntimeError(
+                "SANDBOX_SERVICE_URL must be set in configuration"
+            )
+        if not settings.s3_bucket:
+            raise RuntimeError(
+                "S3_BUCKET must be set in configuration"
+            )
+        
+        s3_storage = S3BlobStorage()
+        compressed_text_storage = CompressedTextStorage(s3_storage)
+        
+        sandbox_manager = RemoteSandboxManager(
+            sandbox_service_url=settings.sandbox_service_url,
+            compressed_text_storage=compressed_text_storage,
+            timeout_per_task=settings.sandbox_timeout_per_task_seconds,
+            container_timeout_offset=settings.sandbox_container_timeout_offset,
+            request_timeout_offset=settings.sandbox_request_timeout_offset,
         )
         request.app.state.sandbox_manager = sandbox_manager
     return sandbox_manager
@@ -86,7 +105,7 @@ def _get_sandbox_manager(request: Request) -> SandboxManager:
 async def register(
     request: Request,
     _req: SignedEnvelope[ValidatorRegisterRequest] = Depends(
-        verify_request_dep(ValidatorRegisterRequest)
+        verify_request_dep_tz(ValidatorRegisterRequest)
     ),
     db: AsyncSession = Depends(get_db_session),
     _stake_check: None = Depends(
@@ -231,7 +250,7 @@ async def register(
 async def request_challenge(
     request: Request,
     _req: SignedEnvelope[GetChallengesRequest] = Depends(
-        verify_request_dep(GetChallengesRequest)
+        verify_request_dep_tz(GetChallengesRequest)
     ),
     db: AsyncSession = Depends(get_db_session),
     _stake_check: None = Depends(
@@ -416,10 +435,10 @@ async def request_challenge(
         challenge_code = await fetch_miner_challenge_code(miner.ss58, script)
         sandbox_manager = _get_sandbox_manager(request)
         compressed_texts = await sandbox_manager.run_batch(
+            batch_id=str(challenge_batch.id),
             challenge_code=challenge_code,
             challenge_texts=challenge_texts,
             compression_ratios=compression_ratios,
-            ttl=timedelta(seconds=settings.sandbox_container_ttl_seconds),
         )
         compressed_lengths = [len(text or "") for text in compressed_texts]
         bt.logging.info(
@@ -617,7 +636,7 @@ async def request_challenge(
 async def score_challenges(
     request: Request,
     _req: SignedEnvelope[PostChallengeScores] = Depends(
-        verify_request_dep(PostChallengeScores)
+        verify_request_dep_tz(PostChallengeScores)
     ),
     db: AsyncSession = Depends(get_db_session),
     _stake_check: None = Depends(
@@ -937,7 +956,7 @@ async def score_challenges(
 async def get_best_miners(
     request: Request,
     _req: SignedEnvelope[GetBestMinersUidRequest] = Depends(
-        verify_request_dep(GetBestMinersUidRequest)
+        verify_request_dep_tz(GetBestMinersUidRequest)
     ),
     db: AsyncSession = Depends(get_db_session),
 ) -> SignedEnvelope[GetBestMinersUidResponse]:
