@@ -13,6 +13,8 @@ from typing import List, Optional
 
 import docker
 
+from .container_config import CONTAINER_CONFIG
+
 
 logger = logging.getLogger(__name__)
 
@@ -203,15 +205,7 @@ class SandboxExecutor:
                         str(input_dir): {"bind": "/sandbox/input", "mode": "ro"},
                         str(output_dir): {"bind": "/sandbox/output", "mode": "rw"},
                     },
-                    mem_limit="2g",
-                    nano_cpus=int(1e9),
-                    network_mode="none",
-                    user="65534:65534",
-                    cap_drop=["ALL"],
-                    read_only=True,
-                    security_opt=["no-new-privileges:true"],
-                    pids_limit=256,
-                    tmpfs={"/tmp": "rw,noexec,nosuid,size=64m"},
+                    **CONTAINER_CONFIG,
                 )
                 
                 # Wait for completion
