@@ -330,7 +330,7 @@ class Validator(AbstractValidator):
                 sig=signature,
             )
             logging.info(
-                f"Reporting {len(results['question_scores'])} question scores to platform for batch_id: {task.batch_id}"
+                f"Reporting payload {payload} question scores to platform for batch_id: {task.batch_id}"
             )
             try:
                 response = await self.client.post(
