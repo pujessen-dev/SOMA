@@ -70,7 +70,7 @@ class Validator(AbstractValidator):
     async def async_init(self) -> None:
         """Initialize async resources in the correct event loop"""
         if self.client is None:
-            self.client = httpx.AsyncClient(timeout=60.0)
+            self.client = httpx.AsyncClient(timeout=self.settings.http_timeout_seconds)
             logging.info("HTTP client initialized")
 
     async def register_to_platform(self) -> ValidatorRegisterResponse:

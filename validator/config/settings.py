@@ -28,7 +28,8 @@ class Settings(BaseModel):
     llm_timeout_seconds: float
     llm_max_tokens: int
     llm_temperature: float
-
+    http_timeout_seconds: float
+    
     @classmethod
     def from_env(cls) -> "Settings":
         wallet_name = os.getenv("WALLET_NAME", "")
@@ -45,7 +46,6 @@ class Settings(BaseModel):
         platform_signer_ss58 = cls._require_non_empty(
             "PLATFORM_SIGNER_SS58", os.getenv("PLATFORM_SIGNER_SS58", "")
         )
-
         try:
             if subtensor_endpoint:
                 subtensor = AsyncSubtensor(
@@ -91,6 +91,7 @@ class Settings(BaseModel):
             llm_timeout_seconds=cls._get_float("LLM_TIMEOUT_SECONDS", 240),
             llm_max_tokens=cls._get_int("LLM_MAX_TOKENS", 1024),
             llm_temperature=cls._get_float("LLM_TEMPERATURE", 0),
+            http_timeout_seconds = cls._get_float("HTTP_TIMEOUT_SECONDS", 240.0)
         )
         return settings
 
