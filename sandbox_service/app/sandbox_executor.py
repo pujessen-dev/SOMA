@@ -304,7 +304,7 @@ class SandboxExecutor:
 
             return responses
 
-    def _cleanup_orphaned_mounts(self, prefix: str = "/tmp/tmp") -> None:
+    def _cleanup_orphaned_mounts(self, prefix: str = "/tmp/sandbox-") -> None:
         """Kill orphaned sandbox containers then unmount their loop mounts."""
         try:
             client = docker.from_env()
