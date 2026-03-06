@@ -55,9 +55,6 @@ def run_batch(
 ) -> list[tuple[str, str]]:
     """Run user main() on all tasks and return [(result, logs), ...].
 
-    The import of the submitted module is counted against the first task's
-    timeout so that module-level code cannot run unconstrained.
-
     Args:
         input_path: Path to submitted code.py
         batch: List of tasks to process
@@ -78,7 +75,7 @@ def run_batch(
         )
 
         try:
-            # Set alarm for this task execution (includes import on first task)
+            # Set alarm for this task execution
             signal.signal(signal.SIGALRM, timeout_handler)
             signal.alarm(int(timeout_per_task) if timeout_per_task > 0 else 0)
 
