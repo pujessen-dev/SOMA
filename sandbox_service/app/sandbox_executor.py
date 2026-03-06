@@ -234,9 +234,6 @@ class SandboxExecutor:
                 # Wait for completion
                 try:
                     result = container.wait(timeout=container_timeout)
-                    logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
-                    if logs.strip():
-                        logger.info("Container logs [%s]:\n%s", sandbox_id, logs)
                 except Exception as exc:
                     logger.error(
                         "Container wait failed (timeout=%ss): %s",
