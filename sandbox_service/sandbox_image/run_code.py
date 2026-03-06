@@ -51,18 +51,22 @@ def load_user_main(input_path: Path):
 
 
 def run_batch(
-    main_fn, batch: list, compression_ratios: list[float | None], timeout_per_task: float
+    input_path: Path, batch: list, compression_ratios: list[float | None], timeout_per_task: float
 ) -> list[tuple[str, str]]:
     """Run user main() on all tasks and return [(result, logs), ...].
-    
+
+    The import of the submitted module is counted against the first task's
+    timeout so that module-level code cannot run unconstrained.
+
     Args:
-        main_fn: User's main function
+        input_path: Path to submitted code.py
         batch: List of tasks to process
         compression_ratios: Compression ratios for each task
         timeout_per_task: Timeout in seconds for each task execution
     """
 
     outputs: list[tuple[str, str]] = []
+    main_fn = None
 
     for idx, task in enumerate(batch):
         buf_out = io.StringIO()
@@ -74,11 +78,13 @@ def run_batch(
         )
 
         try:
-            # Set alarm for this task execution
+            # Set alarm for this task execution (includes import on first task)
             signal.signal(signal.SIGALRM, timeout_handler)
             signal.alarm(int(timeout_per_task) if timeout_per_task > 0 else 0)
-            
+
             with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                if main_fn is None:
+                    main_fn = load_user_main(input_path)
                 out = main_fn(task, compression_ratio)
 
             # Cancel alarm if task completed successfully
@@ -118,8 +124,7 @@ def main() -> int:
 
     try:
         batch, compression_ratios = load_task(task_path)
-        main_fn = load_user_main(input_path)
-        compressed = run_batch(main_fn, batch, compression_ratios, timeout_per_task)
+        compressed = run_batch(input_path, batch, compression_ratios, timeout_per_task)
 
         write_output(output_path, {"compressed": compressed})
         return 0
@@ -134,7 +139,6 @@ def main() -> int:
             output_path,
             {"compressed": [], "error": str(exc), "traceback": err_trace},
         )
-        return 1
         return 1
 
 
