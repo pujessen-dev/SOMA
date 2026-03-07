@@ -2,7 +2,7 @@
 
 import spacy
 
-NLP = spacy.blank("en")
+NLP = spacy.blank("en_core_web_sm")
 
 
 def token_count(text: str) -> int:
