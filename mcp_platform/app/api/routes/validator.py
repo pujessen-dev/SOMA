@@ -1011,8 +1011,6 @@ async def score_challenges(
             detail="Miner is banned; scoring is disabled for this batch",
         )
 
-    validator.current_status = "active"
-
     answer_rows: list[BatchQuestionAnswer] = []
     score_rows: list[BatchQuestionScore] = []
     rollup_scores: dict[int, list[float]] = {}
@@ -1068,6 +1066,7 @@ async def score_challenges(
             score_rows=score_rows,
             rollup_rows=rollup_rows,
         )
+        validator.current_status = "active"
         await db.execute(
             update(BatchAssignment)
             .where(BatchAssignment.challenge_batch_fk == batch_entry.id)
