@@ -65,7 +65,7 @@ from app.api.routes.utils import (
     _get_ratio_count,
     _get_current_burn_state,
     _is_compressed_enough,
-    fetch_miner_challenge_code,
+    get_script_s3_key,
 )
 from app.db.views import V_MINER_SCREENER_STATS
 
@@ -548,11 +548,11 @@ async def request_challenge(
         storage_uuids.append(storage_uuid)
 
     try:
-        challenge_code = await fetch_miner_challenge_code(miner.ss58, script)
+        script_s3_key = get_script_s3_key(miner.ss58, script)
         sandbox_manager = _get_sandbox_manager(request)
         compressed_texts = await sandbox_manager.run_batch(
             batch_id=str(challenge_batch.id),
-            challenge_code=challenge_code,
+            script_s3_key=script_s3_key,
             challenge_texts=challenge_texts,
             compression_ratios=compression_ratios,
             storage_uuids=storage_uuids,
