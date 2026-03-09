@@ -66,12 +66,12 @@ def get_sandbox_executor() -> SandboxExecutor:
 
 
 # Initialize storage
-def get_compressed_text_storage() -> CompressedTextStorage:
-    """Get or create compressed text storage instance."""
-    if not hasattr(app.state, "compressed_text_storage"):
+def get_storage() -> CompressedTextStorage:
+    """Get or create blob storage instance (used for both scripts and compressed texts)."""
+    if not hasattr(app.state, "storage"):
         s3_storage = S3BlobStorage()
-        app.state.compressed_text_storage = CompressedTextStorage(s3_storage)
-    return app.state.compressed_text_storage
+        app.state.storage = CompressedTextStorage(s3_storage)
+    return app.state.storage
 
 
 @app.post("/execute_batch", response_model=ExecuteBatchResponse)
@@ -79,7 +79,7 @@ async def execute_batch(request: ExecuteBatchRequest) -> ExecuteBatchResponse:
     """Execute a batch of compression tasks in sandbox.
     
     This endpoint:
-    1. Receives compression code and texts
+    1. Fetches the miner's challenge script from S3 using the provided key
     2. Runs them in isolated Docker containers
     3. Saves compressed results to S3
     4. Returns success status
@@ -91,34 +91,38 @@ async def execute_batch(request: ExecuteBatchRequest) -> ExecuteBatchResponse:
     )
     
     try:
+        storage = get_storage()
+
+        # Fetch miner challenge code from S3
+        challenge_code = await storage.get_script(request.script_s3_key)
+
         # Get sandbox executor
         executor = get_sandbox_executor()
-        
+
         # Execute sandbox
         compressed_texts = await executor.execute_batch(
-            challenge_code=request.challenge_code,
+            challenge_code=challenge_code,
             challenge_texts=request.challenge_texts,
             compression_ratios=request.compression_ratios,
             timeout_per_task=request.timeout_per_task,
             container_timeout=request.container_timeout,
         )
-        
+
         # Save each compressed text individually to S3 using the per-challenge UUID
-        storage = get_compressed_text_storage()
         for storage_uuid, compressed_text in zip(request.storage_uuids, compressed_texts):
             await storage.save_single(storage_uuid, compressed_text)
-        
+
         logger.info(
             "Batch execution completed: batch_id=%s, results=%d",
             request.batch_id,
             len(compressed_texts),
         )
-        
+
         return ExecuteBatchResponse(
             success=True,
             batch_id=request.batch_id,
         )
-        
+
     except Exception as exc:
         logger.error(
             "Batch execution failed: batch_id=%s, error=%s",

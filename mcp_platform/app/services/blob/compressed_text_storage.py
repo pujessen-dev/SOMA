@@ -50,6 +50,21 @@ class CompressedTextStorage:
         key = self._get_key(batch_id)
         await self._storage.delete(key)
 
+    async def get_script(self, s3_key: str) -> str:
+        """Retrieve raw bytes from S3 by an explicit key (e.g. a miner script).
+
+        Unlike get_single / get_batch this method does NOT apply any key
+        transformation — the key is used as-is.
+
+        Args:
+            s3_key: Exact S3 object key
+
+        Returns:
+            Decoded UTF-8 string
+        """
+        data = await self._storage.get_bytes(s3_key)
+        return data.decode("utf-8")
+
     async def save_single(self, storage_uuid: str, compressed_text: str) -> None:
         """Save a single compressed text under the given UUID key.
 

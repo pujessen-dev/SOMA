@@ -664,42 +664,26 @@ async def _select_miner_ss58(
     return miner, script
 
 
-async def fetch_miner_challenge_code(miner_ss58: str, script: Script) -> str:
+def get_script_s3_key(miner_ss58: str, script: Script) -> str:
     """
-    Fetch script code from blob storage for the given miner and script.
-    In DEBUG mode, tries to fetch from debug/ prefix first, falls back to hot/.
+    Return the S3 key for the miner's challenge script without fetching it.
+    In DEBUG mode returns the debug prefix key; otherwise the hot prefix key.
     """
     from app.core.config import settings
 
-    script_storage = get_script_storage()
-
-    # In debug mode, try debug prefix first
     if settings.debug:
-        try:
-            debug_key = f"debug/miner_solutions/{miner_ss58}/{script.script_uuid}.py"
-            code = await script_storage._blob_storage.get_bytes(debug_key)
-            return code.decode("utf-8")
-        except Exception:
-            # Fall through to try hot prefix
-            pass
+        return f"debug/miner_solutions/{miner_ss58}/{script.script_uuid}.py"
 
-    # Normal hot prefix retrieval
-    try:
-        # Format date_prefix as YYYY-MM-DD string
-        date_prefix = (
-            script.created_at.strftime("%Y-%m-%d") if script.created_at else None
-        )
-        code = await script_storage.get_hot_script(
-            miner_ss58=miner_ss58,
-            script_uuid=script.script_uuid,
-            date_prefix=date_prefix,
-        )
-        return code
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to fetch script code from blob storage "
-            f"for miner {miner_ss58}, script {script.script_uuid}: {e}"
-        ) from e
+    date_prefix = (
+        script.created_at.strftime("%Y-%m-%d") if script.created_at else None
+    )
+    script_storage = get_script_storage()
+    return script_storage.hot_key(
+        miner_ss58=miner_ss58,
+        script_uuid=script.script_uuid,
+        date_prefix=date_prefix,
+    )
+
 
 
 async def _get_request_row(

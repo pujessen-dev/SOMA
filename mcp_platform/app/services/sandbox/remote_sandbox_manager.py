@@ -56,7 +56,7 @@ class RemoteSandboxManager:
         self,
         *,
         batch_id: str,
-        challenge_code: str,
+        script_s3_key: str,
         challenge_texts: list[str],
         compression_ratios: list[float | None],
         storage_uuids: list[str],
@@ -66,7 +66,7 @@ class RemoteSandboxManager:
         
         Args:
             batch_id: Unique batch identifier from ChallengeBatch (for logging)
-            challenge_code: Python code to compress texts
+            script_s3_key: S3 key of the miner's challenge script
             challenge_texts: List of texts to compress
             compression_ratios: Target compression ratios
             storage_uuids: S3 storage UUIDs, one per challenge_text entry
@@ -94,7 +94,7 @@ class RemoteSandboxManager:
         try:
             return await self._execute_remote_batch(
                 batch_id,
-                challenge_code,
+                script_s3_key,
                 challenge_texts,
                 compression_ratios,
                 storage_uuids,
@@ -110,7 +110,7 @@ class RemoteSandboxManager:
     async def _execute_remote_batch(
         self,
         batch_id: str,
-        challenge_code: str,
+        script_s3_key: str,
         challenge_texts: list[str],
         compression_ratios: list[float | None],
         storage_uuids: list[str],
@@ -119,7 +119,7 @@ class RemoteSandboxManager:
         
         Args:
             batch_id: Unique batch identifier from ChallengeBatch (for logging)
-            challenge_code: Python code to compress texts
+            script_s3_key: S3 key of the miner's challenge script
             challenge_texts: List of texts to compress
             compression_ratios: Target compression ratios
             storage_uuids: S3 storage UUIDs, one per challenge_text entry
@@ -136,7 +136,7 @@ class RemoteSandboxManager:
         # Prepare request payload
         payload = {
             "batch_id": batch_id,
-            "challenge_code": challenge_code,
+            "script_s3_key": script_s3_key,
             "challenge_texts": challenge_texts,
             "compression_ratios": compression_ratios,
             "storage_uuids": storage_uuids,
