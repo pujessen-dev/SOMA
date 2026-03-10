@@ -14,7 +14,9 @@ from soma_shared.contracts.api.v1.frontend import (
     ChallengeDetailResponse,
     ChallengeItem,
     ContestSummary,
+    CurrentCompetitionTimeframeResponse,
     FrontendSummaryResponse,
+    MinerCompetitionItem,
     MinerChallengesResponse,
     MinerContestsResponse,
     MinerDetail,
@@ -462,6 +464,72 @@ async def frontend_summary(
 
 
 @router.get(
+    "/competition/timeframe/current",
+    response_model=CurrentCompetitionTimeframeResponse,
+)
+async def get_current_competition_timeframe(
+    db: AsyncSession = Depends(get_db_session),
+    _: None = Depends(_require_private_network),
+) -> CurrentCompetitionTimeframeResponse:
+    timeframe_row = (
+        await db.execute(
+            select(
+                V_ACTIVE_COMPETITION.c.competition_id,
+                V_ACTIVE_COMPETITION.c.competition_name,
+                CompetitionTimeframe.upload_starts_at,
+                CompetitionTimeframe.upload_ends_at,
+                CompetitionTimeframe.eval_starts_at,
+                CompetitionTimeframe.eval_ends_at,
+            )
+            .select_from(V_ACTIVE_COMPETITION)
+            .join(
+                CompetitionTimeframe,
+                CompetitionTimeframe.competition_config_fk
+                == V_ACTIVE_COMPETITION.c.competition_config_id,
+            )
+            .order_by(CompetitionTimeframe.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+
+    if timeframe_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active competition timeframe found",
+        )
+
+    (
+        competition_id,
+        competition_name,
+        upload_start,
+        upload_end,
+        evaluation_start,
+        evaluation_end,
+    ) = timeframe_row
+
+    response = CurrentCompetitionTimeframeResponse(
+        competition_id=int(competition_id),
+        competition_name=competition_name,
+        upload_start=upload_start,
+        upload_end=upload_end,
+        evaluation_start=evaluation_start,
+        evaluation_end=evaluation_end,
+    )
+
+    logger.info(
+        "[Frontend] Current timeframe: competition_id=%s, upload_start=%s, "
+        "upload_end=%s, evaluation_start=%s, evaluation_end=%s",
+        response.competition_id,
+        response.upload_start,
+        response.upload_end,
+        response.evaluation_start,
+        response.evaluation_end,
+    )
+
+    return response
+
+
+@router.get(
     "/miners",
     response_model=MinersListResponse,
     description=(
@@ -770,8 +838,42 @@ async def list_miners(
         .limit(limit)
     )
 
+    result_rows = result.all()
+    miner_ids = [row[0].id for row in result_rows]
+    miner_competitions: dict[int, list[MinerCompetitionItem]] = {}
+
+    if miner_ids:
+        competition_rows = (
+            await db.execute(
+                select(
+                    Script.miner_fk.label("miner_fk"),
+                    Competition.id.label("competition_id"),
+                    Competition.competition_name.label("competition_name"),
+                )
+                .select_from(Script)
+                .join(MinerUpload, MinerUpload.script_fk == Script.id)
+                .join(Competition, Competition.id == MinerUpload.competition_fk)
+                .where(Script.miner_fk.in_(miner_ids))
+                .where(MinerUpload.competition_fk.isnot(None))
+                .group_by(
+                    Script.miner_fk,
+                    Competition.id,
+                    Competition.competition_name,
+                )
+                .order_by(Script.miner_fk.asc(), Competition.id.desc())
+            )
+        ).all()
+
+        for miner_fk, competition_id, competition_name in competition_rows:
+            miner_competitions.setdefault(int(miner_fk), []).append(
+                MinerCompetitionItem(
+                    competition_id=int(competition_id),
+                    competition_name=competition_name,
+                )
+            )
+
     miners = []
-    for row in result.all():
+    for row in result_rows:
         if screener_assigned_subq is not None and is_top_screener_subq is not None:
             (
                 miner,
@@ -847,6 +949,7 @@ async def list_miners(
                 screener_score=(
                     float(screener_score) if screener_score is not None else None
                 ),
+                competitions=miner_competitions.get(miner.id, []),
             )
         )
 
