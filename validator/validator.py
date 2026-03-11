@@ -236,7 +236,7 @@ class Validator(AbstractValidator):
             logging.error(f"Exception during setting weights: {e}", exc_info=True)
             raise  # Re-raise to see if this is causing the crash
 
-    async def get_tasks_for_eval(self) -> GetChallengesResponse:
+    async def get_tasks_for_eval(self) -> GetChallengesResponse | None:
         try:
             payload = GetChallengesRequest()
             nonce = generate_nonce()
