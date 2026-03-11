@@ -388,15 +388,8 @@ class Validator(AbstractValidator):
         return min(interval, safe_max)
 
     @staticmethod
-    def _next_sleep_interval(
-        *,
-        current_poll_interval: float,
-        base_poll_interval: float,
-        can_fetch: bool,
-    ) -> float:
-        if can_fetch:
-            return current_poll_interval
-        return min(current_poll_interval, base_poll_interval)
+    def _loop_tick_interval(base_poll_interval: float) -> float:
+        return max(0.5, min(base_poll_interval, 1.0))
 
     async def report_results(self, task, results):
         try:
@@ -456,6 +449,7 @@ class Validator(AbstractValidator):
         current_poll_interval = base_poll_interval
         consecutive_no_tasks = 0
         consecutive_ratio_failures = 0
+        fetch_cooldown_until = 0.0
 
         in_flight: set[asyncio.Task] = set()
         last_weight_set = 0.0
@@ -494,11 +488,14 @@ class Validator(AbstractValidator):
                 max_in_flight = (
                     1 if consecutive_ratio_failures > 0 else self.settings.max_concurrent_evaluations
                 )
-                can_fetch = has and len(in_flight) < max_in_flight
+                fetch_due = now >= fetch_cooldown_until
+                can_fetch = has and len(in_flight) < max_in_flight and fetch_due
+                cooldown_remaining = max(0.0, fetch_cooldown_until - now)
                 logging.info(
                     f"Has evaluation capacity: {has}, in_flight tasks: {len(in_flight)}, "
                     f"max_in_flight: {max_in_flight}, can_fetch: {can_fetch}, "
-                    f"ratio_fail_streak: {consecutive_ratio_failures}"
+                    f"ratio_fail_streak: {consecutive_ratio_failures}, "
+                    f"fetch_due: {fetch_due}, cooldown_remaining: {cooldown_remaining:.1f}s"
                 )
                 if can_fetch:
                     logging.info("Fetching tasks from platform...")
@@ -510,6 +507,7 @@ class Validator(AbstractValidator):
                         consecutive_no_tasks = 0
                         consecutive_ratio_failures = 0
                         current_poll_interval = base_poll_interval
+                        fetch_cooldown_until = now
                         logging.info(
                             f"Fetched task: {task.batch_id}, reset poll interval to {current_poll_interval}s"
                         )
@@ -530,6 +528,7 @@ class Validator(AbstractValidator):
                                 f"(attempt {consecutive_ratio_failures}), backing off to "
                                 f"{current_poll_interval:.1f}s and limiting intake concurrency to 1"
                             )
+                            fetch_cooldown_until = time.monotonic() + current_poll_interval
                         else:
                             # No tasks available (503 response) - apply standard backoff
                             consecutive_no_tasks += 1
@@ -544,12 +543,9 @@ class Validator(AbstractValidator):
                                 f"No tasks available (attempt {consecutive_no_tasks}, cause={cause}), "
                                 f"backing off to {current_poll_interval:.1f}s poll interval"
                             )
+                            fetch_cooldown_until = time.monotonic() + current_poll_interval
 
-                sleep_interval = self._next_sleep_interval(
-                    current_poll_interval=current_poll_interval,
-                    base_poll_interval=base_poll_interval,
-                    can_fetch=can_fetch,
-                )
+                sleep_interval = self._loop_tick_interval(base_poll_interval)
                 await asyncio.sleep(sleep_interval)
         except asyncio.CancelledError as cancel_exc:
             logging.error(f"Validator run CANCELLED! Traceback:", exc_info=True)

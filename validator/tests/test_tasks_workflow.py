@@ -62,23 +62,9 @@ def test_classify_503_cause_variants():
     assert Validator._classify_503_cause("Platform is at capacity") == "service_unavailable"
 
 
-def test_next_sleep_interval_policy():
-    assert (
-        Validator._next_sleep_interval(
-            current_poll_interval=120.0,
-            base_poll_interval=15.0,
-            can_fetch=True,
-        )
-        == 120.0
-    )
-    assert (
-        Validator._next_sleep_interval(
-            current_poll_interval=120.0,
-            base_poll_interval=15.0,
-            can_fetch=False,
-        )
-        == 15.0
-    )
+def test_loop_tick_interval_bounds():
+    assert Validator._loop_tick_interval(15.0) == 1.0
+    assert Validator._loop_tick_interval(0.2) == 0.5
 
 
 def test_compute_backoff_interval_hybrid_policy():
