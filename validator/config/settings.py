@@ -38,7 +38,6 @@ class Settings(BaseModel):
         hotkey = os.getenv("WALLET_HOTKEY", "")
         netuid = cls._get_int("NETUID", 114)
         subtensor_network = os.getenv("BT_NETWORK", "finney")
-        subtensor_endpoint = os.getenv("BT_CHAIN_ENDPOINT")
 
         wallet_name = cls._require_non_empty("WALLET_NAME", wallet_name)
         hotkey = cls._require_non_empty("WALLET_HOTKEY", hotkey)
@@ -49,19 +48,12 @@ class Settings(BaseModel):
             "PLATFORM_SIGNER_SS58", os.getenv("PLATFORM_SIGNER_SS58", "")
         )
         try:
-            if subtensor_endpoint:
-                subtensor = AsyncSubtensor(
-                    network=subtensor_network,
-                    chain_endpoint=subtensor_endpoint,
-                )
-            else:
-                subtensor = AsyncSubtensor(network=subtensor_network)
+            subtensor = AsyncSubtensor(network=subtensor_network)
         except Exception as exc:
             logger.error(
                 "subtensor_init_failed",
                 extra={
                     "network": subtensor_network,
-                    "chain_endpoint": subtensor_endpoint,
                     "error": str(exc),
                 },
             )
