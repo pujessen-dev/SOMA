@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 import math
 import bittensor as bt
-import spacy
+import tiktoken
 
 from fastapi import APIRouter, HTTPException, status, Request
 from sqlalchemy import func, select, literal, and_
@@ -38,11 +38,38 @@ from app.api.deps import get_script_storage
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["validator"])
+TOKENIZER_CHEATING_CHARS_PER_TOKEN_THRESHOLD = 1.3
 
 
 @lru_cache(maxsize=1)
 def _get_nlp():
-    return spacy.load("en_core_web_sm")
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens(text: str) -> int:
+    encoding = _get_nlp()
+    return len(encoding.encode_ordinary(text))
+
+
+def _chars_per_token(text: str) -> float:
+    token_count = _count_tokens(text)
+    if token_count <= 0:
+        return 0.0
+    return len(text) / token_count
+
+
+def _is_chars_per_token_outlier(
+    original: str,
+    compressed: str,
+    threshold: float = TOKENIZER_CHEATING_CHARS_PER_TOKEN_THRESHOLD,
+) -> bool:
+    original_chars_per_token = _chars_per_token(original)
+    if original_chars_per_token <= 0:
+        return False
+
+    compressed_chars_per_token = _chars_per_token(compressed)
+    chars_per_token_ratio = compressed_chars_per_token / original_chars_per_token
+    return chars_per_token_ratio > threshold
 
 
 def _is_compressed_enough(
@@ -50,18 +77,19 @@ def _is_compressed_enough(
     compressed: str,
     ratio: float | None,
 ) -> bool:
+    if _is_chars_per_token_outlier(original=original, compressed=compressed):
+        return False
+
     if ratio is None:
         return True
     if ratio <= 0:
         return False
 
-    nlp = _get_nlp()
-
-    original_tokens = sum(1 for t in nlp.make_doc(original) if not t.is_space)
+    original_tokens = _count_tokens(original)
     if original_tokens == 0:
         return False
 
-    compressed_tokens = sum(1 for t in nlp.make_doc(compressed) if not t.is_space)
+    compressed_tokens = _count_tokens(compressed)
     return (compressed_tokens / original_tokens) <= ratio
 
 

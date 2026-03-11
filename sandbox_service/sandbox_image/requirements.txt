@@ -1,6 +1,6 @@
 nltk>=3.8
-spacy>=3.7
 regex>=2023.12.25
+tiktoken==0.12.0
 
 numpy>=1.24
 scipy>=1.11
