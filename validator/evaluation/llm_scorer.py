@@ -7,7 +7,7 @@ import os
 import re
 from pydantic import BaseModel
 from typing import Any
-import spacy
+import tiktoken
 from validator.evaluation.prompts import ANSWERS_GENERATION_PROMPT
 
 
@@ -130,7 +130,7 @@ class Scoring:
             self._llm = LLMClient()
         self._exact_weight = exact_weight
         self._f1_weight = f1_weight
-        self._nlp = spacy.load("en_core_web_sm")
+        self._prompt_encoding = tiktoken.get_encoding("cl100k_base")
 
     async def _request_with_retry(self, func, retries: int = 3, delay: float = 1.0):
         attempts = max(1, retries)
@@ -289,8 +289,14 @@ class Scoring:
     def _tokenize(self, text: str) -> set[str]:
         text = re.sub(r"(\d)([A-Za-z])", r"\1 \2", text)
         text = re.sub(r"([A-Za-z])(\d)", r"\1 \2", text)
-        doc = self._nlp(text)
-        return {t.text.lower() for t in doc if not t.is_space and not t.is_punct}
+        token_ids = self._prompt_encoding.encode_ordinary(text)
+        tokens: set[str] = set()
+        for token_id in token_ids:
+            token_text = self._prompt_encoding.decode_single_token_bytes(token_id).decode(
+                "utf-8", errors="ignore"
+            )
+            tokens.update(re.findall(r"[a-z0-9]+", token_text.lower()))
+        return tokens
 
     def _strip_code_fences(self, text: str) -> str:
         if text.startswith("```"):

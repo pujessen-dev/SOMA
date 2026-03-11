@@ -38,7 +38,6 @@ cytoolz==1.1.0
 decorator==5.2.1
 docker==7.1.0
 ecdsa==0.19.1
-en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
 eth-hash==0.7.1
 eth-keys==0.7.0
 eth-typing==5.2.1
@@ -106,9 +105,6 @@ six==1.17.0
 smart_open==7.5.0
 smmap==5.0.2
 smoldot-light==0.1.0
-spacy==3.8.11
-spacy-legacy==3.0.12
-spacy-loggers==1.0.5
 SQLAlchemy==2.0.45
 srsly==2.5.2
 starlette==0.37.2
@@ -117,6 +113,7 @@ thinc==8.3.10
 toml==0.10.2
 toolz==1.1.0
 tqdm==4.67.1
+tiktoken==0.12.0
 typer==0.21.1
 typer-slim==0.21.1
 typing-inspection==0.4.2
