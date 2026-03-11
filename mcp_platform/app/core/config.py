@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -24,6 +25,12 @@ class Settings(BaseSettings):
     inject_mock_data: bool = Field(default=True, alias="INJECT_MOCK")
     log_levels: dict[str, str] = Field(default_factory=dict, alias="LOG_LEVELS")
     log_include_extras: bool = Field(default=True, alias="LOG_INCLUDE_EXTRAS")
+    log_dir: Path | None = Field(default=None, alias="LOG_DIR")
+    log_file_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        alias="LOG_FILE_MAX_BYTES",
+    )
+    log_file_backup_count: int = Field(default=5, alias="LOG_FILE_BACKUP_COUNT")
 
     # DB
     postgres_dsn: str | None = Field(
@@ -150,6 +157,20 @@ class Settings(BaseSettings):
                     parsed[key.strip()] = level.strip()
             return {str(k): str(v) for k, v in parsed.items()}
         raise ValueError("LOG_LEVELS must be a mapping or JSON string")
+
+    @field_validator("log_dir", mode="before")
+    @classmethod
+    def _parse_log_dir(cls, value: Any) -> Path | None:
+        if value is None:
+            return None
+        if isinstance(value, Path):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            return Path(raw)
+        raise ValueError("LOG_DIR must be a filesystem path")
 
     @field_validator("private_network_cidrs", mode="before")
     @classmethod

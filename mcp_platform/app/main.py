@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.core.config import settings
-from app.core.logging import configure_logging
+from app.core.logging import configure_logging, get_logger
 from soma_shared.db.session import init_db, close_db, get_db_session, clear_db
 from app.db.mock_data import seed_debug_data
 from soma_shared.db.models.validator import Validator
@@ -26,7 +26,7 @@ from app.services.batch_cleanup import (
 from app.services.metagraph import MetagraphService
 from app.services.metagraph_runner import MetagraphServiceRunner
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _iter_exception_chain(exc: BaseException):
@@ -80,6 +80,9 @@ def create_app() -> FastAPI:
         settings.log_level,
         settings.log_levels,
         include_extras=settings.log_include_extras,
+        log_dir=settings.log_dir,
+        log_file_max_bytes=settings.log_file_max_bytes,
+        log_file_backup_count=settings.log_file_backup_count,
     )
 
     app = FastAPI(
@@ -154,6 +157,9 @@ def create_app() -> FastAPI:
             settings.log_level,
             settings.log_levels,
             include_extras=settings.log_include_extras,
+            log_dir=settings.log_dir,
+            log_file_max_bytes=settings.log_file_max_bytes,
+            log_file_backup_count=settings.log_file_backup_count,
         )
         log_extra: dict[str, object] = {
             "step": step,
@@ -261,6 +267,9 @@ def create_app() -> FastAPI:
             settings.log_level,
             settings.log_levels,
             include_extras=settings.log_include_extras,
+            log_dir=settings.log_dir,
+            log_file_max_bytes=settings.log_file_max_bytes,
+            log_file_backup_count=settings.log_file_backup_count,
         )
         hot_ss58 = None
         try:
