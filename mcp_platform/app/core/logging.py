@@ -71,20 +71,20 @@ _LOGGER_ROUTES = (
     ),
     _LoggerRoute(
         "app.services.batch_cleanup",
-        "app.jobs.batch_cleanup",
+        "app.jobs.cleanup",
         "jobs",
-        "batch_cleanup",
+        "cleanup",
     ),
     _LoggerRoute(
         "app.services.competition_challenge_activation",
-        "app.jobs.competition_challenge_activation",
-        "jobs",
-        "competition_challenge_activation",
+        "app.protocol.challenge_activation",
+        "protocol",
+        "challenge_activation",
     ),
     _LoggerRoute(
         "app.services.metagraph_runner",
-        "app.jobs.metagraph_runner",
-        "jobs",
+        "app.integration.metagraph.runner",
+        "integration",
         "metagraph_runner",
     ),
     _LoggerRoute(
@@ -125,6 +125,18 @@ _LOGGER_ROUTES = (
     ),
 )
 
+_FILE_LOGGER_ROUTES = {
+    "app.lifecycle": Path("lifecycle"),
+    "app.api": Path("api"),
+    "app.protocol": Path("protocol"),
+    "app.jobs.heartbeat": Path("jobs") / "heartbeat",
+    "app.jobs.cleanup": Path("jobs") / "cleanup",
+    "app.integration.metagraph": Path("integration") / "metagraph",
+    "app.integration.sandbox": Path("integration") / "sandbox",
+    "app.integration.storage": Path("integration") / "storage",
+    "app.security": Path("security"),
+}
+
 
 class _DomainLoggerAdapter(logging.LoggerAdapter):
     def process(self, msg, kwargs):
@@ -161,6 +173,17 @@ class _LevelRangeFilter(logging.Filter):
         if self._max_level is not None and record.levelno > self._max_level:
             return False
         return True
+
+
+class _LoggerPrefixFilter(logging.Filter):
+    def __init__(self, logger_prefix: str) -> None:
+        super().__init__()
+        self._logger_prefix = logger_prefix
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name == self._logger_prefix or record.name.startswith(
+            self._logger_prefix + "."
+        )
 
 
 def _resolve_logger_context(module_name: str) -> tuple[str, str, str]:
@@ -238,6 +261,13 @@ def _render_extras_value(value: object) -> str:
         return str(value)
 
 
+def _to_python_log_level(level: str) -> int:
+    normalized = str(level).strip().upper()
+    if normalized == "TRACE":
+        return logging.DEBUG
+    return logging.getLevelNamesMapping().get(normalized, logging.INFO)
+
+
 def _build_json_formatter() -> jsonlogger.JsonFormatter:
     return jsonlogger.JsonFormatter(
         "%(asctime)s %(levelname)s %(name)s %(log_domain)s %(log_component)s %(message)s"
@@ -247,6 +277,7 @@ def _build_json_formatter() -> jsonlogger.JsonFormatter:
 def _create_file_handler(
     log_path: Path,
     *,
+    logger_prefix: str,
     min_level: int,
     max_level: int | None,
     max_bytes: int,
@@ -260,20 +291,31 @@ def _create_file_handler(
     )
     handler.setLevel(min_level)
     handler.setFormatter(_build_json_formatter())
+    handler.addFilter(_LoggerPrefixFilter(logger_prefix))
     handler.addFilter(_LevelRangeFilter(min_level=min_level, max_level=max_level))
     return handler
 
 
-def _build_file_handlers(
+def _build_file_handlers_for_prefix(
     log_dir: Path,
     *,
+    logger_prefix: str,
     max_bytes: int,
     backup_count: int,
 ) -> list[logging.Handler]:
     log_dir.mkdir(parents=True, exist_ok=True)
     return [
         _create_file_handler(
+            log_dir / "all.log",
+            logger_prefix=logger_prefix,
+            min_level=logging.DEBUG,
+            max_level=None,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        ),
+        _create_file_handler(
             log_dir / "debug.log",
+            logger_prefix=logger_prefix,
             min_level=logging.DEBUG,
             max_level=logging.DEBUG,
             max_bytes=max_bytes,
@@ -281,6 +323,7 @@ def _build_file_handlers(
         ),
         _create_file_handler(
             log_dir / "info.log",
+            logger_prefix=logger_prefix,
             min_level=logging.INFO,
             max_level=logging.INFO,
             max_bytes=max_bytes,
@@ -288,6 +331,7 @@ def _build_file_handlers(
         ),
         _create_file_handler(
             log_dir / "warning.log",
+            logger_prefix=logger_prefix,
             min_level=logging.WARNING,
             max_level=logging.WARNING,
             max_bytes=max_bytes,
@@ -295,6 +339,7 @@ def _build_file_handlers(
         ),
         _create_file_handler(
             log_dir / "error.log",
+            logger_prefix=logger_prefix,
             min_level=logging.ERROR,
             max_level=None,
             max_bytes=max_bytes,
@@ -312,12 +357,15 @@ def _attach_file_handlers(
 ) -> None:
     if log_dir is None:
         return
-    for handler in _build_file_handlers(
-        log_dir,
-        max_bytes=max_bytes,
-        backup_count=backup_count,
-    ):
-        logger.addHandler(handler)
+    for logger_prefix, relative_dir in _FILE_LOGGER_ROUTES.items():
+        target_dir = log_dir / relative_dir
+        for handler in _build_file_handlers_for_prefix(
+            target_dir,
+            logger_prefix=logger_prefix,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        ):
+            logger.addHandler(handler)
 
 
 def _configure_json_logging(
@@ -329,7 +377,7 @@ def _configure_json_logging(
     log_file_backup_count: int = 5,
 ) -> None:
     root = logging.getLogger()
-    root.setLevel(level.upper())
+    root.setLevel(_to_python_log_level(level))
 
     for h in list(root.handlers):
         root.removeHandler(h)
@@ -512,11 +560,13 @@ def configure_logging(
     _clear_non_bt_handlers(bt)
     try:
         bt.logging.enable_third_party_loggers()
+        app_logger = logging.getLogger("app")
+        app_logger.setLevel(_to_python_log_level(level))
         _apply_extras_filter(include_extras)
         _apply_context_defaults_filter()
         _apply_render_extras_filter(include_extras)
         _attach_file_handlers(
-            logging.getLogger("app"),
+            app_logger,
             log_dir=resolved_log_dir,
             max_bytes=log_file_max_bytes,
             backup_count=log_file_backup_count,
