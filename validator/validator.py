@@ -53,6 +53,7 @@ class Validator(AbstractValidator):
     def __init__(self):
         super().__init__()
         self.settings = self.init_settings()
+        self._last_fetch_cause = "unknown"
         self.evaluator = Evaluator(settings=self.settings)
         self.weight_setter = WeightSetter(
             netuid=self.settings.netuid, subtensor=self.settings.subtensor
@@ -262,18 +263,34 @@ class Validator(AbstractValidator):
                 if response.status_code == 503:
                     try:
                         error_detail = response.json().get("detail", "")
-                        if "No tasks available" in error_detail:
+                        cause = self._classify_503_cause(error_detail)
+                        self._last_fetch_cause = cause
+                        if cause == "compression_ratio_all_failed":
+                            logging.info(
+                                "Platform reports all challenges failed compression ratio check. "
+                                "Validator will retry later with compression backoff."
+                            )
+                            logging.info(
+                                "get_tasks_for_eval: Returning None (503 compression ratio all failed)"
+                            )
+                            return None
+                        if cause == "no_tasks":
                             logging.info(
                                 "Platform reports no tasks available - all miners are scored. "
                                 "Validator will retry later with backoff."
                             )
                             logging.info("get_tasks_for_eval: Returning None (503)")
                             return None
+                        logging.info(
+                            f"get_tasks_for_eval: Returning None (503 other cause: {cause})"
+                        )
+                        return None
                     except Exception as e503:
                         logging.error(
                             f"get_tasks_for_eval: Error parsing 503 response: {e503}",
                             exc_info=True,
                         )
+                        self._last_fetch_cause = "service_unavailable"
                         pass
 
                 response.raise_for_status()
@@ -315,6 +332,7 @@ class Validator(AbstractValidator):
                     "Fetched challenges",
                     extra={"payload": signed.payload.model_dump(mode="json")},
                 )
+                self._last_fetch_cause = "ok"
                 logging.info("get_tasks_for_eval: Returning payload")
                 return signed.payload
             except httpx.HTTPError as e:
@@ -325,12 +343,23 @@ class Validator(AbstractValidator):
                     f"Response text: {getattr(e.response, 'text', 'N/A')}",
                     exc_info=True,
                 )
+                self._last_fetch_cause = "http_error"
                 logging.info("get_tasks_for_eval: Returning None (HTTP error)")
                 return None
         except Exception as e:
             logging.error(f"Exception during get_tasks_for_eval: {e}", exc_info=True)
+            self._last_fetch_cause = "exception"
             logging.info("get_tasks_for_eval: Returning None (exception)")
             return None
+
+    @staticmethod
+    def _classify_503_cause(error_detail: str) -> str:
+        detail = (error_detail or "").lower()
+        if "compression ratio check" in detail:
+            return "compression_ratio_all_failed"
+        if "no tasks available" in detail:
+            return "no_tasks"
+        return "service_unavailable"
 
     async def report_results(self, task, results):
         try:
