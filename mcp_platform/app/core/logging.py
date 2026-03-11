@@ -1,6 +1,8 @@
 import json
 import logging
-from logging.handlers import QueueHandler
+from dataclasses import dataclass
+from logging.handlers import QueueHandler, RotatingFileHandler
+from pathlib import Path
 from typing import Mapping
 from pythonjsonlogger import jsonlogger
 
@@ -27,7 +29,166 @@ _LOG_RECORD_ATTRS = {
     "processName",
     "process",
     "message",
+    "log_domain",
+    "log_component",
 }
+
+
+@dataclass(frozen=True)
+class _LoggerRoute:
+    module_prefix: str
+    logger_name: str
+    log_domain: str
+    log_component: str
+
+
+_LOGGER_ROUTES = (
+    _LoggerRoute("app.main", "app.lifecycle.main", "lifecycle", "main"),
+    _LoggerRoute(
+        "app.api.routes.frontend",
+        "app.api.frontend",
+        "api",
+        "frontend",
+    ),
+    _LoggerRoute("app.api.routes.miner", "app.api.miner", "api", "miner"),
+    _LoggerRoute(
+        "app.api.routes.validator",
+        "app.protocol.validator",
+        "protocol",
+        "validator",
+    ),
+    _LoggerRoute(
+        "app.api.routes.utils",
+        "app.protocol.utils",
+        "protocol",
+        "utils",
+    ),
+    _LoggerRoute(
+        "app.services.heartbeat",
+        "app.jobs.heartbeat",
+        "jobs",
+        "heartbeat",
+    ),
+    _LoggerRoute(
+        "app.services.batch_cleanup",
+        "app.jobs.batch_cleanup",
+        "jobs",
+        "batch_cleanup",
+    ),
+    _LoggerRoute(
+        "app.services.competition_challenge_activation",
+        "app.jobs.competition_challenge_activation",
+        "jobs",
+        "competition_challenge_activation",
+    ),
+    _LoggerRoute(
+        "app.services.metagraph_runner",
+        "app.jobs.metagraph_runner",
+        "jobs",
+        "metagraph_runner",
+    ),
+    _LoggerRoute(
+        "app.services.metagraph",
+        "app.integration.metagraph",
+        "integration",
+        "metagraph",
+    ),
+    _LoggerRoute(
+        "app.services.sandbox",
+        "app.integration.sandbox",
+        "integration",
+        "sandbox",
+    ),
+    _LoggerRoute(
+        "app.services.script_store",
+        "app.integration.storage",
+        "integration",
+        "storage",
+    ),
+    _LoggerRoute(
+        "app.services.challenge_factory",
+        "app.protocol.challenge_factory",
+        "protocol",
+        "challenge_factory",
+    ),
+    _LoggerRoute(
+        "app.db.validator_heartbeat_log",
+        "app.jobs.heartbeat.persistence",
+        "jobs",
+        "heartbeat_persistence",
+    ),
+    _LoggerRoute(
+        "app.db.mock_data",
+        "app.lifecycle.mock_data",
+        "lifecycle",
+        "mock_data",
+    ),
+)
+
+
+class _DomainLoggerAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        extra = dict(self.extra)
+        provided_extra = kwargs.get("extra")
+        if isinstance(provided_extra, dict):
+            extra.update(provided_extra)
+        kwargs["extra"] = extra
+        return msg, kwargs
+
+
+class _ContextDefaultsFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        _, default_domain, default_component = _resolve_logger_context(record.name)
+        record.__dict__.setdefault("log_domain", default_domain)
+        record.__dict__.setdefault("log_component", default_component)
+        return True
+
+
+class _LevelRangeFilter(logging.Filter):
+    def __init__(
+        self,
+        *,
+        min_level: int,
+        max_level: int | None = None,
+    ) -> None:
+        super().__init__()
+        self._min_level = min_level
+        self._max_level = max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < self._min_level:
+            return False
+        if self._max_level is not None and record.levelno > self._max_level:
+            return False
+        return True
+
+
+def _resolve_logger_context(module_name: str) -> tuple[str, str, str]:
+    normalized = (module_name or "").strip()
+    for route in _LOGGER_ROUTES:
+        if normalized == route.module_prefix or normalized.startswith(
+            route.module_prefix + "."
+        ):
+            return route.logger_name, route.log_domain, route.log_component
+
+    if normalized.startswith("app."):
+        parts = normalized.split(".")
+        log_domain = parts[1] if len(parts) > 1 else "app"
+        log_component = "_".join(parts[2:]) if len(parts) > 2 else log_domain
+        return normalized, log_domain, log_component or log_domain
+
+    return normalized or "app.unknown", "external", normalized or "unknown"
+
+
+def get_logger(module_name: str) -> logging.LoggerAdapter:
+    logger_name, log_domain, log_component = _resolve_logger_context(module_name)
+    return _DomainLoggerAdapter(
+        logging.getLogger(logger_name),
+        {
+            "log_domain": log_domain,
+            "log_component": log_component,
+        },
+    )
 
 
 class _ExtrasFilter(logging.Filter):
@@ -77,10 +238,95 @@ def _render_extras_value(value: object) -> str:
         return str(value)
 
 
+def _build_json_formatter() -> jsonlogger.JsonFormatter:
+    return jsonlogger.JsonFormatter(
+        "%(asctime)s %(levelname)s %(name)s %(log_domain)s %(log_component)s %(message)s"
+    )
+
+
+def _create_file_handler(
+    log_path: Path,
+    *,
+    min_level: int,
+    max_level: int | None,
+    max_bytes: int,
+    backup_count: int,
+) -> RotatingFileHandler:
+    handler = RotatingFileHandler(
+        log_path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    handler.setLevel(min_level)
+    handler.setFormatter(_build_json_formatter())
+    handler.addFilter(_LevelRangeFilter(min_level=min_level, max_level=max_level))
+    return handler
+
+
+def _build_file_handlers(
+    log_dir: Path,
+    *,
+    max_bytes: int,
+    backup_count: int,
+) -> list[logging.Handler]:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return [
+        _create_file_handler(
+            log_dir / "debug.log",
+            min_level=logging.DEBUG,
+            max_level=logging.DEBUG,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        ),
+        _create_file_handler(
+            log_dir / "info.log",
+            min_level=logging.INFO,
+            max_level=logging.INFO,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        ),
+        _create_file_handler(
+            log_dir / "warning.log",
+            min_level=logging.WARNING,
+            max_level=logging.WARNING,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        ),
+        _create_file_handler(
+            log_dir / "error.log",
+            min_level=logging.ERROR,
+            max_level=None,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        ),
+    ]
+
+
+def _attach_file_handlers(
+    logger: logging.Logger,
+    *,
+    log_dir: Path | None,
+    max_bytes: int,
+    backup_count: int,
+) -> None:
+    if log_dir is None:
+        return
+    for handler in _build_file_handlers(
+        log_dir,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+    ):
+        logger.addHandler(handler)
+
+
 def _configure_json_logging(
     level: str,
     module_levels: Mapping[str, str] | None,
     include_extras: bool,
+    log_dir: Path | None = None,
+    log_file_max_bytes: int = 10 * 1024 * 1024,
+    log_file_backup_count: int = 5,
 ) -> None:
     root = logging.getLogger()
     root.setLevel(level.upper())
@@ -89,11 +335,18 @@ def _configure_json_logging(
         root.removeHandler(h)
 
     handler = logging.StreamHandler()
-    fmt = jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    fmt = _build_json_formatter()
     handler.setFormatter(fmt)
     _apply_extras_filter(include_extras)
+    _apply_context_defaults_filter()
     _apply_render_extras_filter(False)
     root.addHandler(handler)
+    _attach_file_handlers(
+        root,
+        log_dir=log_dir,
+        max_bytes=log_file_max_bytes,
+        backup_count=log_file_backup_count,
+    )
     _apply_module_log_levels(module_levels)
 
 
@@ -171,6 +424,17 @@ def _apply_render_extras_filter(enable: bool) -> None:
             logger.addFilter(_RenderExtrasFilter())
 
 
+def _apply_context_defaults_filter() -> None:
+    _remove_filter_type(_ContextDefaultsFilter)
+    root = logging.getLogger()
+    root.addFilter(_ContextDefaultsFilter())
+    for logger in logging.root.manager.loggerDict.values():
+        if not isinstance(logger, logging.Logger):
+            continue
+        if logger.handlers:
+            logger.addFilter(_ContextDefaultsFilter())
+
+
 def _remove_filter_type(filter_type: type[logging.Filter]) -> None:
     root = logging.getLogger()
     for f in list(root.filters):
@@ -208,12 +472,23 @@ def configure_logging(
     level: str,
     module_levels: Mapping[str, str] | None = None,
     include_extras: bool = True,
+    log_dir: str | Path | None = None,
+    log_file_max_bytes: int = 10 * 1024 * 1024,
+    log_file_backup_count: int = 5,
 ) -> None:
     global _BT_CONFIGURED
+    resolved_log_dir = Path(log_dir).expanduser() if log_dir else None
     try:
         import bittensor as bt  # type: ignore
     except Exception:
-        _configure_json_logging(level, module_levels, include_extras)
+        _configure_json_logging(
+            level,
+            module_levels,
+            include_extras,
+            log_dir=resolved_log_dir,
+            log_file_max_bytes=log_file_max_bytes,
+            log_file_backup_count=log_file_backup_count,
+        )
         return
 
     # Use bittensor logger for application logs.
@@ -223,7 +498,14 @@ def configure_logging(
         try:
             bt.logging.register_primary_logger("app")
         except Exception:
-            _configure_json_logging(level, module_levels, include_extras)
+            _configure_json_logging(
+                level,
+                module_levels,
+                include_extras,
+                log_dir=resolved_log_dir,
+                log_file_max_bytes=log_file_max_bytes,
+                log_file_backup_count=log_file_backup_count,
+            )
             return
         _BT_CONFIGURED = True
 
@@ -231,8 +513,22 @@ def configure_logging(
     try:
         bt.logging.enable_third_party_loggers()
         _apply_extras_filter(include_extras)
+        _apply_context_defaults_filter()
         _apply_render_extras_filter(include_extras)
+        _attach_file_handlers(
+            logging.getLogger("app"),
+            log_dir=resolved_log_dir,
+            max_bytes=log_file_max_bytes,
+            backup_count=log_file_backup_count,
+        )
         _disable_propagation_for_queue_handlers()
         _apply_module_log_levels(module_levels)
     except Exception:
-        _configure_json_logging(level, module_levels, include_extras)
+        _configure_json_logging(
+            level,
+            module_levels,
+            include_extras,
+            log_dir=resolved_log_dir,
+            log_file_max_bytes=log_file_max_bytes,
+            log_file_backup_count=log_file_backup_count,
+        )
