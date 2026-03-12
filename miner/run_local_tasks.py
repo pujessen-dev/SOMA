@@ -49,14 +49,18 @@ def run(tasks_path: Path, ratios: list[float], limit: int | None, results_dir: P
                 print(f"Task {i}: skipped (no text field found)")
                 continue
 
-            challenge_name = task_obj.get("challenge_name", f"task_{i}")
+            challenge_name = task_obj.get("challenge_name", "task")
+            safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in challenge_name).strip("_")
+            if not safe_name:
+                safe_name = "task"
+            task_slug = f"task_{i:04d}_{safe_name}"
             original_bytes = len(source_text.encode("utf-8"))
             original_tokens = token_count(source_text)
 
             print(f"\n=== Task {i}: {challenge_name} ===")
             print(f"original_bytes={original_bytes}  original_tokens={original_tokens}")
 
-            task_dir = results_dir / challenge_name
+            task_dir = results_dir / task_slug
             task_dir.mkdir(parents=True, exist_ok=True)
 
             for ratio in ratios:
