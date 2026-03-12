@@ -361,6 +361,21 @@ async def request_challenge(
 
     try:
         async with db.begin():
+            validator = await _get_validator(
+                db,
+                ss58=_req.sig.signer_ss58,
+            )
+            validator_status = (validator.current_status or "").lower()
+            if validator_status != "working":
+                logger.info(
+                    "request_challenge: rejecting validator with non-working status "
+                    f"validator_ss58={validator.ss58} status={validator.current_status} "
+                    f"request_id={request_id}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Validator must have status 'working' to request challenges",
+                )
             for attempt in range(max_attempts):
                 miner, script = await _select_miner_ss58(request, db)
 
@@ -467,10 +482,6 @@ async def request_challenge(
                             detail="batch challenges creation failed",
                         ) from e
 
-                validator = await _get_validator(
-                    db,
-                    ss58=_req.sig.signer_ss58,
-                )
                 db.add(
                     BatchAssignment(
                         challenge_batch_fk=challenge_batch.id,
