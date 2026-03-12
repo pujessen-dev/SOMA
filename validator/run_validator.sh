@@ -68,7 +68,7 @@ update_dependencies() {
     fi
 
     log "Updating Python dependencies from requirements.txt."
-    if ! eval "$pip_cmd install -r requirements.txt"; then
+    if ! eval "$pip_cmd install --upgrade -r requirements.txt"; then
         log "Dependency update failed."
         return 1
     fi
