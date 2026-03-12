@@ -19,6 +19,7 @@ if [[ -z "${REPO_DIR:-}" ]]; then
 fi
 PM2_NAME="${PM2_NAME:-mcp-validator}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-origin/main}"
+ENV_FILE="${ENV_FILE:-validator/.env}"
 
 log() {
     printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
@@ -41,10 +42,45 @@ if ! git rev-parse "$UPSTREAM_BRANCH" >/dev/null 2>&1; then
     exit 1
 fi
 
+load_validator_port() {
+    if [[ -f "$ENV_FILE" ]]; then
+        local env_port
+        env_port=$(grep -E '^[[:space:]]*VALIDATOR_PORT=' "$ENV_FILE" | tail -n 1 | cut -d '=' -f 2- | tr -d '[:space:]')
+        if [[ -n "$env_port" ]]; then
+            VALIDATOR_PORT="$env_port"
+        fi
+    fi
+    VALIDATOR_PORT="${VALIDATOR_PORT:-8000}"
+}
+
+update_dependencies() {
+    local pip_cmd
+
+    if [[ -x "$REPO_DIR/.venv/bin/python" ]]; then
+        pip_cmd="$REPO_DIR/.venv/bin/python -m pip"
+    elif command -v python3 >/dev/null 2>&1; then
+        pip_cmd="python3 -m pip"
+    elif command -v python >/dev/null 2>&1; then
+        pip_cmd="python -m pip"
+    else
+        log "No Python interpreter found for dependency update."
+        return 1
+    fi
+
+    log "Updating Python dependencies from requirements.txt."
+    if ! eval "$pip_cmd install --upgrade -r requirements.txt"; then
+        log "Dependency update failed."
+        return 1
+    fi
+
+    return 0
+}
+
 start_validator() {
+    load_validator_port
     log "Starting validator via pm2 ('$PM2_NAME')."
     pm2 delete "$PM2_NAME" >/dev/null 2>&1 || true
-    pm2 start "uvicorn validator.validator:app --host 0.0.0.0 --port 8000 --env-file validator/.env" --name "$PM2_NAME"
+    pm2 start "uvicorn validator.validator:app --host 0.0.0.0 --port $VALIDATOR_PORT --env-file $ENV_FILE" --name "$PM2_NAME"
 }
 
 is_validator_running() {
@@ -70,8 +106,13 @@ action_if_needed() {
     if [[ "$local_hash" != "$remote_hash" ]]; then
         log "New commit detected on $UPSTREAM_BRANCH ($local_hash -> $remote_hash). Synchronizing repository."
         if git reset --hard "$UPSTREAM_BRANCH"; then
-            log "Repository synchronized to $(git rev-parse --short HEAD). Restarting validator."
-            start_validator
+            log "Repository synchronized to $(git rev-parse --short HEAD). Updating dependencies."
+            if update_dependencies; then
+                log "Dependencies updated. Restarting validator."
+                start_validator
+            else
+                log "Dependency update failed; leaving validator as-is. Resolve manually."
+            fi
         else
             log "Reset failed; leaving validator as-is. Resolve manually."
         fi
