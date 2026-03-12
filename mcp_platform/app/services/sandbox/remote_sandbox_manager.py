@@ -152,7 +152,7 @@ class RemoteSandboxManager:
                 )
                 response.raise_for_status()
                 result = response.json()
-                
+                sandbox_error = result.get("error")
                 if not result.get("success"):
                     error_msg = result.get("error", "Unknown sandbox error")
                     logger.error(
