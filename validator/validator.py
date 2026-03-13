@@ -542,9 +542,7 @@ class Validator(AbstractValidator):
 
                 in_flight = {task for task in in_flight if not task.done()}
                 has = self.has_eval_capacity()
-                max_in_flight = (
-                    1 if consecutive_ratio_failures > 0 else self.settings.max_concurrent_evaluations
-                )
+                max_in_flight = self.settings.max_concurrent_evaluations
                 fetch_due = now >= fetch_cooldown_until
                 can_fetch = has and len(in_flight) < max_in_flight and fetch_due
                 cooldown_remaining = max(0.0, fetch_cooldown_until - now)
@@ -574,18 +572,12 @@ class Validator(AbstractValidator):
                         if cause == "compression_ratio_all_failed":
                             consecutive_ratio_failures += 1
                             consecutive_no_tasks = 0
-                            current_poll_interval = self._compute_backoff_interval(
-                                streak=consecutive_ratio_failures,
-                                base_poll_interval=base_poll_interval,
-                                backoff_multiplier=backoff_multiplier,
-                                max_backoff_interval=max_backoff_interval,
-                            )
+                            current_poll_interval = base_poll_interval
                             logging.info(
                                 "All challenges failed compression ratio check "
-                                f"(attempt {consecutive_ratio_failures}), backing off to "
-                                f"{current_poll_interval:.1f}s and limiting intake concurrency to 1"
+                                f"(attempt {consecutive_ratio_failures}), retrying immediately"
                             )
-                            fetch_cooldown_until = time.monotonic() + current_poll_interval
+                            fetch_cooldown_until = now
                         else:
                             # No tasks available (503 response) - apply standard backoff
                             consecutive_no_tasks += 1
