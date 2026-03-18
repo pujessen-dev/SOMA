@@ -38,6 +38,7 @@ from validator.evaluation.llm_scorer import LLMClient, LLMInsufficientFundsError
 from soma_shared.utils.verifier import verify_httpx_response
 import bittensor as bt
 
+
 def configure_logging() -> None:
     root = logging.getLogger()
     if root.handlers:
@@ -497,8 +498,6 @@ class Validator(AbstractValidator):
         # Initialize async resources in the correct event loop
         await self.async_init()
         
-        # TODO change this for a blocks from chain instead of mocked time intervals
-        weight_interval_seconds = 360 * 12
         base_poll_interval = self.settings.task_poll_interval_seconds
         max_backoff_interval = self.settings.max_backoff_interval_seconds
         backoff_multiplier = self.settings.backoff_multiplier
@@ -509,7 +508,7 @@ class Validator(AbstractValidator):
         fetch_cooldown_until = 0.0
 
         in_flight: set[asyncio.Task] = set()
-        last_weight_set = 0.0
+        last_weight_set_block: int | None = None
         weight_task: asyncio.Task | None = None
 
         async def process_task(task: GetChallengesResponse) -> None:
@@ -530,21 +529,27 @@ class Validator(AbstractValidator):
             logging.info("Validator run loop started")
             while True:
                 now = time.monotonic()
-                # TODO Change to blocks operation
-                if (
-                    weight_interval_seconds > 0
-                    and (now - last_weight_set) >= weight_interval_seconds
-                ):
-                    if weight_task is None or weight_task.done():
-                        logging.info("Creating weight setting task")
-                        weight_task = asyncio.create_task(self.set_weights())
-                        last_weight_set = now
+
+                try:
+                    current_block = await self.settings.subtensor.get_current_block()
+                    if last_weight_set_block is None:
+                        last_weight_set_block = current_block
+                        logging.info(f"Initialized last_weight_set_block={current_block}")
+                    blocks_since_last = current_block - last_weight_set_block
+                    if blocks_since_last >= self.settings.weight_block_interval:
+                        if weight_task is None or weight_task.done():
+                            logging.info(
+                                f"Block {current_block}: {blocks_since_last} blocks since last weight set "
+                                f"(interval={self.settings.weight_block_interval}), setting weights"
+                            )
+                            weight_task = asyncio.create_task(self.set_weights())
+                            last_weight_set_block = current_block
+                except Exception as block_exc:
+                    logging.warning(f"Failed to fetch current block: {block_exc}", exc_info=True)
 
                 in_flight = {task for task in in_flight if not task.done()}
                 has = self.has_eval_capacity()
-                max_in_flight = (
-                    1 if consecutive_ratio_failures > 0 else self.settings.max_concurrent_evaluations
-                )
+                max_in_flight = self.settings.max_concurrent_evaluations
                 fetch_due = now >= fetch_cooldown_until
                 can_fetch = has and len(in_flight) < max_in_flight and fetch_due
                 cooldown_remaining = max(0.0, fetch_cooldown_until - now)
@@ -574,18 +579,12 @@ class Validator(AbstractValidator):
                         if cause == "compression_ratio_all_failed":
                             consecutive_ratio_failures += 1
                             consecutive_no_tasks = 0
-                            current_poll_interval = self._compute_backoff_interval(
-                                streak=consecutive_ratio_failures,
-                                base_poll_interval=base_poll_interval,
-                                backoff_multiplier=backoff_multiplier,
-                                max_backoff_interval=max_backoff_interval,
-                            )
+                            current_poll_interval = base_poll_interval
                             logging.info(
                                 "All challenges failed compression ratio check "
-                                f"(attempt {consecutive_ratio_failures}), backing off to "
-                                f"{current_poll_interval:.1f}s and limiting intake concurrency to 1"
+                                f"(attempt {consecutive_ratio_failures}), retrying immediately"
                             )
-                            fetch_cooldown_until = time.monotonic() + current_poll_interval
+                            fetch_cooldown_until = now
                         else:
                             # No tasks available (503 response) - apply standard backoff
                             consecutive_no_tasks += 1
