@@ -433,7 +433,11 @@ async def frontend_summary(
             .where(CompetitionChallenge.is_active.is_(True))
         )
 
-    validators_count = await db.scalar(select(func.count()).select_from(Validator))
+    validators_count = await db.scalar(
+        select(func.count())
+        .select_from(Validator)
+        .where(Validator.is_archive.is_(False))
+    )
     active_validators_count = await db.scalar(
         select(func.count())
         .select_from(ValidatorRegistration)
@@ -1975,7 +1979,11 @@ async def list_validators(
     db: AsyncSession = Depends(get_db_session),
     _: None = Depends(_require_private_network),
 ) -> ValidatorsListResponse:
-    result = await db.execute(select(Validator).order_by(Validator.id.asc()))
+    result = await db.execute(
+        select(Validator)
+        .where(Validator.is_archive.is_(False))
+        .order_by(Validator.id.asc())
+    )
     validators = [
         ValidatorListItem(
             id=validator.id,
