@@ -38,7 +38,6 @@ from validator.evaluation.llm_scorer import LLMClient, LLMInsufficientFundsError
 from soma_shared.utils.verifier import verify_httpx_response
 import bittensor as bt
 
-WEIGHT_BLOCK_INTERVAL = 110
 
 def configure_logging() -> None:
     root = logging.getLogger()
@@ -537,11 +536,11 @@ class Validator(AbstractValidator):
                         last_weight_set_block = current_block
                         logging.info(f"Initialized last_weight_set_block={current_block}")
                     blocks_since_last = current_block - last_weight_set_block
-                    if blocks_since_last >= WEIGHT_BLOCK_INTERVAL:
+                    if blocks_since_last >= self.settings.weight_block_interval:
                         if weight_task is None or weight_task.done():
                             logging.info(
                                 f"Block {current_block}: {blocks_since_last} blocks since last weight set "
-                                f"(interval={WEIGHT_BLOCK_INTERVAL}), setting weights"
+                                f"(interval={self.settings.weight_block_interval}), setting weights"
                             )
                             weight_task = asyncio.create_task(self.set_weights())
                             last_weight_set_block = current_block
