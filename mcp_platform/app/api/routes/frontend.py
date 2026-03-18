@@ -241,7 +241,7 @@ async def _get_latest_active_competition_id(db: AsyncSession) -> int | None:
     return await db.scalar(select(V_ACTIVE_COMPETITION.c.competition_id).limit(1))
 
 
-async def _should_mask_challenge_text(
+async def _is_eval_started(
     db: AsyncSession,
     competition_id: int,
 ) -> bool:
@@ -258,10 +258,10 @@ async def _should_mask_challenge_text(
         .limit(1)
     )
     if eval_starts_at is None:
-        return True
+        return False
     if eval_starts_at.tzinfo is None:
         eval_starts_at = eval_starts_at.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) < eval_starts_at
+    return datetime.now(timezone.utc) >= eval_starts_at
 
 
 def _extract_client_ip(request: Request) -> str | None:
@@ -1277,6 +1277,8 @@ async def get_miner(
             miner_rank = int(rank_row.rank) if rank_row.rank is not None else None
             total_miners_count = int(rank_row.total_miners or 0)
 
+    eval_started = await _is_eval_started(db, latest_active_competition_id)
+
     # Calculate pending assignments
     pending_screener = (
         (screener_assigned or 0) - (screener_scored or 0) if screener_assigned else None
@@ -1313,8 +1315,8 @@ async def get_miner(
             id=competition_id,
             name=f"{competition_name} #{competition_id}",
             date=last_upload_date,
-            score=float(competition_score) if ((competition_score is not None) and (miner_status in {"scored", "evaluating"})) else None,
-            rank=display_rank if miner_status in {"scored", "evaluating"} else None,
+            score=float(competition_score) if ((competition_score is not None) and (miner_status in {"scored", "evaluating"}) and eval_started) else None,
+            rank=display_rank if ((miner_status in {"scored", "evaluating"}) and eval_started) else None,
         )
 
     response = MinerDetailResponse(
@@ -1325,7 +1327,7 @@ async def get_miner(
             contests=int(competitions_count or 0),
             status=miner_status,
             total_score=(
-                float(total_score_result) if ((total_score_result is not None) and (miner_status in {"scored", "evaluating"})) else None
+                float(total_score_result) if ((total_score_result is not None) and (miner_status in {"scored", "evaluating"}) and eval_started) else None
             ),
         ),
         last_contest=last_competition,
@@ -1430,7 +1432,7 @@ async def get_miner_contest_challenge_detail(
         created_at,
         overall_score,
     ) = batch_challenge_data
-    mask_text = await _should_mask_challenge_text(db, competition_id)
+    eval_started = await _is_eval_started(db, competition_id)
 
     # Get all questions for this challenge with answers and scores
     questions_result = await db.execute(
@@ -1471,11 +1473,11 @@ async def get_miner_contest_challenge_detail(
         QuestionDetail(
             question_id=question.id,
             question_text=(
-                TEXT_HIDDEN_PLACEHOLDER if mask_text else question.question
+                TEXT_HIDDEN_PLACEHOLDER if not eval_started else question.question
             ),
-            miner_answer=TEXT_HIDDEN_PLACEHOLDER if mask_text else produced_answer,
+            miner_answer=TEXT_HIDDEN_PLACEHOLDER if not eval_started else produced_answer,
             ground_truth_answer=(
-                TEXT_HIDDEN_PLACEHOLDER if mask_text else ground_truth
+                TEXT_HIDDEN_PLACEHOLDER if not eval_started else ground_truth
             ),
             score=float(avg_score) if avg_score is not None else None,
             score_details=(
@@ -1493,7 +1495,7 @@ async def get_miner_contest_challenge_detail(
             challenge_id=challenge.id,
             challenge_name=challenge.challenge_name,
             challenge_text=(
-                TEXT_HIDDEN_PLACEHOLDER if mask_text else challenge.challenge_text
+                TEXT_HIDDEN_PLACEHOLDER if not eval_started else challenge.challenge_text
             ),
             competition_name=competition_name,
             competition_id=competition_id,
@@ -1584,6 +1586,11 @@ async def get_miner_contests_challenges(
     )
 
     challenges_data = result.all()
+
+    eval_started = await _is_eval_started(db, latest_active_competition_id)
+
+    if not eval_started:
+        return MinerChallengesResponse(challenges=[], total=0)
 
     challenges = [
         ChallengeItem(
@@ -1719,6 +1726,10 @@ async def get_miner_contests(
         if rank_row is not None:
             miner_rank = int(rank_row.rank) if rank_row.rank is not None else None
             total_miners_count = int(rank_row.total_miners or 0)
+
+    eval_started = await _is_eval_started(db, latest_active_competition_id)
+    if not eval_started:
+        return MinerContestsResponse(contests=[], total=0)
 
     competitions = [
         ContestSummary(
@@ -1873,7 +1884,7 @@ async def get_miner_screener_contests(
     if rank_row is not None:
         miner_rank = int(rank_row.rank) if rank_row.rank is not None else None
         total_miners_count = int(rank_row.total_miners or 0)
-    mask_text = await _should_mask_challenge_text(db, latest_active_competition_id)
+    eval_started = await _is_eval_started(db, latest_active_competition_id)
 
     # Get detailed questions for each challenge
     challenges = []
@@ -1927,11 +1938,11 @@ async def get_miner_screener_contests(
             QuestionDetail(
                 question_id=question.id,
                 question_text=(
-                    TEXT_HIDDEN_PLACEHOLDER if mask_text else question.question
+                    TEXT_HIDDEN_PLACEHOLDER if not eval_started else question.question
                 ),
-                miner_answer=TEXT_HIDDEN_PLACEHOLDER if mask_text else produced_answer,
+                miner_answer=TEXT_HIDDEN_PLACEHOLDER if not eval_started else produced_answer,
                 ground_truth_answer=(
-                    TEXT_HIDDEN_PLACEHOLDER if mask_text else ground_truth
+                    TEXT_HIDDEN_PLACEHOLDER if not eval_started else ground_truth
                 ),
                 score=float(avg_score_q) if avg_score_q is not None else None,
                 score_details=(
@@ -1947,7 +1958,7 @@ async def get_miner_screener_contests(
             batch_challenge_id=batch_challenge_id,
             challenge_id=challenge_id,
             challenge_name=challenge_name,
-            challenge_text=TEXT_HIDDEN_PLACEHOLDER if mask_text else challenge_text,
+            challenge_text=TEXT_HIDDEN_PLACEHOLDER if not eval_started else challenge_text,
             competition_name=competition_name,
             competition_id=competition_id,
             compression_ratio=compression_ratio,
