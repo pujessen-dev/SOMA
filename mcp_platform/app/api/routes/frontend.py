@@ -433,11 +433,17 @@ async def frontend_summary(
             .where(CompetitionChallenge.is_active.is_(True))
         )
 
-    validators_count = await db.scalar(select(func.count()).select_from(Validator))
+    validators_count = await db.scalar(
+        select(func.count())
+        .select_from(Validator)
+        .where(Validator.is_archive.is_(False))
+    )
     active_validators_count = await db.scalar(
         select(func.count())
         .select_from(ValidatorRegistration)
+        .join(Validator, ValidatorRegistration.validator_fk == Validator.id)
         .where(ValidatorRegistration.is_active.is_(True))
+        .where(Validator.is_archive.is_(False))
     )
 
     burn_active, burn_ratio = await _get_current_burn_state(db)
@@ -1973,12 +1979,17 @@ async def list_validators(
     db: AsyncSession = Depends(get_db_session),
     _: None = Depends(_require_private_network),
 ) -> ValidatorsListResponse:
-    result = await db.execute(select(Validator).order_by(Validator.id.asc()))
+    result = await db.execute(
+        select(Validator)
+        .where(Validator.is_archive.is_(False))
+        .order_by(Validator.id.asc())
+    )
     validators = [
         ValidatorListItem(
             id=validator.id,
             name=validator.ss58,
-            status=validator.current_status,
+            status="archive" if validator.is_archive else validator.current_status,
+            is_archive=bool(validator.is_archive),
             register_date=validator.created_at,
         )
         for validator in result.scalars().all()
