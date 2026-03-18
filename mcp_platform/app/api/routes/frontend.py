@@ -433,11 +433,17 @@ async def frontend_summary(
             .where(CompetitionChallenge.is_active.is_(True))
         )
 
-    validators_count = await db.scalar(select(func.count()).select_from(Validator))
+    validators_count = await db.scalar(
+        select(func.count())
+        .select_from(Validator)
+        .where(Validator.is_archive.is_(False))
+    )
     active_validators_count = await db.scalar(
         select(func.count())
         .select_from(ValidatorRegistration)
+        .join(Validator, ValidatorRegistration.validator_fk == Validator.id)
         .where(ValidatorRegistration.is_active.is_(True))
+        .where(Validator.is_archive.is_(False))
     )
 
     burn_active, burn_ratio = await _get_current_burn_state(db)
@@ -542,7 +548,7 @@ async def list_miners(
     db: AsyncSession = Depends(get_db_session),
     _: None = Depends(_require_private_network),
     page: int = Query(default=1, ge=1),
-    limit: int = Query(default=20, ge=1, le=200),
+    limit: int = Query(default=20, ge=1, le=400),
 ) -> MinersListResponse:
     """List only miners that uploaded a script in the latest active competition."""
 
@@ -622,18 +628,21 @@ async def list_miners(
     total_pages = max(1, ceil(total_value / limit)) if total_value else 1
     offset = (page - 1) * limit
 
-    # Calculate average score and challenge counts from the latest active competition
-    # EXCLUDING screener challenges
+    # Competition score should include all active competition challenges.
     active_competition_score_subq = (
         select(
+            V_MINER_COMPETITION_RANK.c.miner_id.label("miner_fk"),
+            V_MINER_COMPETITION_RANK.c.total_score.label("avg_score"),
+        )
+        .select_from(V_MINER_COMPETITION_RANK)
+        .where(V_MINER_COMPETITION_RANK.c.competition_id == latest_active_competition_subq)
+        .subquery()
+    )
+
+    # Keep progress counters based on non-screener competition challenges.
+    active_competition_progress_subq = (
+        select(
             ChallengeBatch.miner_fk.label("miner_fk"),
-            (
-                func.sum(
-                    BatchChallengeScore.score
-                    / func.sqrt(BatchChallenge.compression_ratio)
-                )
-                / func.sum(literal(1.0) / func.sqrt(BatchChallenge.compression_ratio))
-            ).label("avg_score"),
             func.count(func.distinct(BatchChallenge.id)).label("miner_challenges"),
             func.count(func.distinct(BatchChallengeScore.batch_challenge_fk)).label(
                 "scored_challenges"
@@ -790,8 +799,8 @@ async def list_miners(
         Miner,
         last_submit_subq.c.last_submit,
         active_competition_score_subq.c.avg_score,
-        active_competition_score_subq.c.miner_challenges,
-        active_competition_score_subq.c.scored_challenges,
+        active_competition_progress_subq.c.miner_challenges,
+        active_competition_progress_subq.c.scored_challenges,
         total_competition_challenges_subq.label("total_challenges"),
         has_script_subq.c.has_script,
         screener_score_subq.c.screener_score,
@@ -813,6 +822,10 @@ async def list_miners(
     query = query.outerjoin(
         active_competition_score_subq,
         active_competition_score_subq.c.miner_fk == Miner.id,
+    )
+    query = query.outerjoin(
+        active_competition_progress_subq,
+        active_competition_progress_subq.c.miner_fk == Miner.id,
     )
     query = query.join(has_script_subq, has_script_subq.c.miner_fk == Miner.id)
     query = query.outerjoin(
@@ -930,23 +943,28 @@ async def list_miners(
             else None
         )
 
+        miner_status = _miner_status(
+            total_challenges,
+            screener_assigned,
+            pending_competition,
+            pending_screener,
+            screener_scored,
+            scored_challenges,
+            is_top,
+            has_script=(has_script or 0) > 0,
+            miner_banned_status=bool(miner.miner_banned_status),
+        )
+        competition_score = float(avg_score) if avg_score is not None else None
+        if miner_status not in {"scored", "evaluating"}:
+            competition_score = None
+
         miners.append(
             MinerListItem(
                 uid=miner.id,
                 hotkey=miner.ss58,
-                score=float(avg_score) if avg_score is not None else None,
+                score=competition_score,
                 last_submit=last_submit,
-                status=_miner_status(
-                    total_challenges,
-                    screener_assigned,
-                    pending_competition,
-                    pending_screener,
-                    screener_scored,
-                    scored_challenges,
-                    is_top,
-                    has_script=(has_script or 0) > 0,
-                    miner_banned_status=bool(miner.miner_banned_status),
-                ),
+                status=miner_status,
                 screener_score=(
                     float(screener_score) if screener_score is not None else None
                 ),
@@ -1001,6 +1019,8 @@ async def get_miner(
     competition_total = None
     competition_assigned = None
     competition_scored = None
+    pending_screener = None
+    pending_competition = None
     is_in_top = False
     has_script = False
 
@@ -1083,11 +1103,6 @@ async def get_miner(
             Competition.id == MinerUpload.competition_fk,
         )
         .where(Script.miner_fk == miner.id)
-    )
-
-    # Get the latest active competition
-    latest_active_competition_id = await db.scalar(
-        select(V_ACTIVE_COMPETITION.c.competition_id).limit(1)
     )
 
     # Get last competition with its score (properly filtered by competition)
@@ -1264,6 +1279,28 @@ async def get_miner(
 
     eval_started = await _is_eval_started(db, latest_active_competition_id)
 
+    # Calculate pending assignments
+    pending_screener = (
+        (screener_assigned or 0) - (screener_scored or 0) if screener_assigned else None
+    )
+    pending_competition = (
+        (competition_assigned or 0) - (competition_scored or 0)
+        if competition_assigned
+        else None
+    )
+
+    miner_status = _miner_status(
+        competition_total,
+        screener_assigned,
+        pending_competition,
+        pending_screener,
+        screener_scored,
+        competition_scored,
+        is_in_top,
+        has_script,
+        miner_banned_status=bool(miner.miner_banned_status),
+    )
+    
     if last_competition_data is not None:
         competition_id, competition_name, last_upload_date, competition_score = (
             last_competition_data
@@ -1278,19 +1315,9 @@ async def get_miner(
             id=competition_id,
             name=f"{competition_name} #{competition_id}",
             date=last_upload_date,
-            score=float(competition_score) if (competition_score is not None and eval_started) else None,
-            rank=display_rank if eval_started else None,
+            score=float(competition_score) if ((competition_score is not None) and (miner_status in {"scored", "evaluating"}) and eval_started) else None,
+            rank=display_rank if ((miner_status in {"scored", "evaluating"}) and eval_started) else None,
         )
-
-    # Calculate pending assignments
-    pending_screener = (
-        (screener_assigned or 0) - (screener_scored or 0) if screener_assigned else None
-    )
-    pending_competition = (
-        (competition_assigned or 0) - (competition_scored or 0)
-        if competition_assigned
-        else None
-    )
 
     response = MinerDetailResponse(
         miner=MinerDetail(
@@ -1298,19 +1325,9 @@ async def get_miner(
             hotkey=miner.ss58,
             registered_at=miner.created_at,
             contests=int(competitions_count or 0),
-            status=_miner_status(
-                competition_total,
-                screener_assigned,
-                pending_competition,
-                pending_screener,
-                screener_scored,
-                competition_scored,
-                is_in_top,
-                has_script,
-                miner_banned_status=bool(miner.miner_banned_status),
-            ),
+            status=miner_status,
             total_score=(
-                float(total_score_result) if (total_score_result is not None and eval_started) else None
+                float(total_score_result) if ((total_score_result is not None) and (miner_status in {"scored", "evaluating"}) and eval_started) else None
             ),
         ),
         last_contest=last_competition,
@@ -1973,12 +1990,17 @@ async def list_validators(
     db: AsyncSession = Depends(get_db_session),
     _: None = Depends(_require_private_network),
 ) -> ValidatorsListResponse:
-    result = await db.execute(select(Validator).order_by(Validator.id.asc()))
+    result = await db.execute(
+        select(Validator)
+        .where(Validator.is_archive.is_(False))
+        .order_by(Validator.id.asc())
+    )
     validators = [
         ValidatorListItem(
             id=validator.id,
             name=validator.ss58,
-            status=validator.current_status,
+            status="archive" if validator.is_archive else validator.current_status,
+            is_archive=bool(validator.is_archive),
             register_date=validator.created_at,
         )
         for validator in result.scalars().all()
