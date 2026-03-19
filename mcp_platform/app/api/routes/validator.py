@@ -6,7 +6,7 @@ import uuid
 import bittensor as bt
 
 from fastapi import APIRouter, HTTPException, status, Depends, Request
-from sqlalchemy import func, select, update, literal
+from sqlalchemy import delete, func, select, update, literal
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
@@ -22,6 +22,7 @@ from soma_shared.contracts.validator.v1.messages import (
     QA,
     PostChallengeScores,
     PostChallengeScoresResponse,
+    ScoreSubmissionType,
     GetBestMinersUidRequest,
     GetBestMinersUidResponse,
     MinerWeight,
@@ -199,6 +200,49 @@ async def _upsert_batch_scoring_rows(
             set_={"score": rollup_stmt.excluded.score},
         )
         await db.execute(rollup_stmt)
+
+
+async def _release_batch_assignment_for_retry(
+    db: AsyncSession,
+    *,
+    batch_id: int,
+    validator_id: int,
+) -> tuple[int, int]:
+    """Release an assigned batch so it can be retried.
+
+    Returns:
+        tuple: (deleted_assignment_count, deleted_compressed_text_count)
+    """
+    batch_challenge_ids = list(
+        (
+            await db.execute(
+                select(BatchChallenge.id).where(
+                    BatchChallenge.challenge_batch_fk == batch_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    deleted_compressed_count = 0
+    if batch_challenge_ids:
+        compressed_delete_result = await db.execute(
+            delete(BatchCompressedText).where(
+                BatchCompressedText.batch_challenge_fk.in_(batch_challenge_ids)
+            )
+        )
+        deleted_compressed_count = compressed_delete_result.rowcount or 0
+
+    assignment_delete_result = await db.execute(
+        delete(BatchAssignment)
+        .where(BatchAssignment.challenge_batch_fk == batch_id)
+        .where(BatchAssignment.validator_fk == validator_id)
+        .where(BatchAssignment.done_at.is_(None))
+    )
+    deleted_assignment_count = assignment_delete_result.rowcount or 0
+
+    return deleted_assignment_count, deleted_compressed_count
 
 
 @router.post(
@@ -614,6 +658,35 @@ async def request_challenge(
                 "request_challenge: sandbox returned error "
                 f"request_id={request_id} batch_id={challenge_batch.id}: {sandbox_error}"
             )
+            deleted_assignment_count, deleted_compressed_count = (
+                await _release_batch_assignment_for_retry(
+                    db,
+                    batch_id=challenge_batch.id,
+                    validator_id=validator.id,
+                )
+            )
+            await db.commit()
+            logger.warning(
+                "request_challenge: released batch after sandbox error",
+                extra={
+                    "request_id": request_id,
+                    "batch_id": challenge_batch.id,
+                    "validator_ss58": validator.ss58,
+                    "sandbox_error": sandbox_error,
+                    "deleted_assignment_count": deleted_assignment_count,
+                    "deleted_compressed_count": deleted_compressed_count,
+                },
+            )
+            await _log_error_response(
+                request,
+                db,
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Sandbox execution failed; batch released for retry",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Sandbox execution failed; batch released for retry",
+            )
         compressed_lengths = [len(text or "") for text in compressed_texts]
         logger.info(
             "request_challenge: compressed text lengths "
@@ -651,6 +724,8 @@ async def request_challenge(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Sandbox execution failed: {exc}",
         ) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error(
             "request_challenge: error preparing sandbox batch "
@@ -886,17 +961,6 @@ async def score_challenges(
 ) -> SignedEnvelope[PostChallengeScoresResponse]:
     request_id = getattr(request.state, "request_id", None)
     payload = _req.payload
-    if not payload.question_scores:
-        await _log_error_response(
-            request,
-            db,
-            status.HTTP_400_BAD_REQUEST,
-            "No question scores provided",
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No question scores provided",
-        )
 
     try:
         batch_id = int(payload.batch_id)
@@ -955,6 +1019,189 @@ async def score_challenges(
         db,
         ss58=_req.sig.signer_ss58,
     )
+    assignment_result = await db.execute(
+        select(BatchAssignment)
+        .where(BatchAssignment.challenge_batch_fk == batch_entry.id)
+        .where(BatchAssignment.validator_fk == validator.id)
+        .where(BatchAssignment.done_at.is_(None))
+    )
+    assignment = assignment_result.scalars().first()
+
+    if payload.submission_type == ScoreSubmissionType.ERROR:
+        if payload.question_scores:
+            await _log_error_response(
+                request,
+                db,
+                status.HTTP_400_BAD_REQUEST,
+                "question_scores must be empty when submission_type=error",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="question_scores must be empty when submission_type=error",
+            )
+
+        error_code = (payload.error_code or "").strip()
+        if not error_code:
+            await _log_error_response(
+                request,
+                db,
+                status.HTTP_400_BAD_REQUEST,
+                "error_code is required when submission_type=error",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="error_code is required when submission_type=error",
+            )
+        if error_code.startswith("miner_"):
+            await _log_error_response(
+                request,
+                db,
+                status.HTTP_400_BAD_REQUEST,
+                "miner_* error_code is not allowed for submission_type=error",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="miner_* error_code is not allowed for submission_type=error",
+            )
+
+        if assignment is None:
+            other_open_assignment = await db.scalar(
+                select(BatchAssignment.id)
+                .where(BatchAssignment.challenge_batch_fk == batch_entry.id)
+                .where(BatchAssignment.done_at.is_(None))
+                .limit(1)
+            )
+            if other_open_assignment is not None:
+                await _log_error_response(
+                    request,
+                    db,
+                    status.HTTP_403_FORBIDDEN,
+                    "Batch is not assigned to this validator",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Batch is not assigned to this validator",
+                )
+            # Idempotent response: assignment may already be released or completed.
+            logger.info(
+                "score_challenges_error_no_open_assignment",
+                extra={
+                    "request_id": request_id,
+                    "batch_id": payload.batch_id,
+                    "validator_ss58": _req.sig.signer_ss58,
+                    "error_code": error_code,
+                    "retryable": payload.retryable,
+                },
+            )
+        else:
+            try:
+                if payload.retryable:
+                    (
+                        deleted_assignment_count,
+                        deleted_compressed_count,
+                    ) = await _release_batch_assignment_for_retry(
+                        db,
+                        batch_id=batch_entry.id,
+                        validator_id=validator.id,
+                    )
+                    logger.warning(
+                        "score_challenges_retryable_error_released",
+                        extra={
+                            "request_id": request_id,
+                            "batch_id": payload.batch_id,
+                            "validator_ss58": _req.sig.signer_ss58,
+                            "error_code": error_code,
+                            "error_message": payload.error_message,
+                            "retryable": payload.retryable,
+                            "deleted_assignment_count": deleted_assignment_count,
+                            "deleted_compressed_count": deleted_compressed_count,
+                            "error_details": payload.error_details,
+                        },
+                    )
+                else:
+                    await db.execute(
+                        update(BatchAssignment)
+                        .where(BatchAssignment.challenge_batch_fk == batch_entry.id)
+                        .where(BatchAssignment.validator_fk == validator.id)
+                        .where(BatchAssignment.done_at.is_(None))
+                        .values(done_at=datetime.now(timezone.utc))
+                    )
+                    logger.warning(
+                        "score_challenges_non_retryable_error_completed",
+                        extra={
+                            "request_id": request_id,
+                            "batch_id": payload.batch_id,
+                            "validator_ss58": _req.sig.signer_ss58,
+                            "error_code": error_code,
+                            "error_message": payload.error_message,
+                            "retryable": payload.retryable,
+                            "error_details": payload.error_details,
+                        },
+                    )
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                logger.exception(
+                    "score_challenges_error_mode_persistence_failed",
+                    extra={
+                        "request_id": request_id,
+                        "batch_id": payload.batch_id,
+                        "validator_ss58": _req.sig.signer_ss58,
+                        "error_code": error_code,
+                        "retryable": payload.retryable,
+                        "error": str(exc),
+                    },
+                )
+                await _log_error_response(
+                    request,
+                    db,
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "Error submission persistence failed",
+                    exc=exc,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Error submission persistence failed",
+                ) from exc
+
+        response_payload = PostChallengeScoresResponse(ok=True)
+        response_nonce = generate_nonce()
+        response_sig = sign_payload_model(
+            response_payload, nonce=response_nonce, wallet=settings.wallet
+        )
+        response = SignedEnvelope(payload=response_payload, sig=response_sig)
+        log_payload = response_payload.model_dump(mode="json")
+        log_payload["batch_id"] = payload.batch_id
+        log_payload["submission_type"] = payload.submission_type.value
+        log_payload["error_code"] = payload.error_code
+        log_payload["retryable"] = payload.retryable
+        if request_id is not None:
+            log_payload["request_id"] = request_id
+        await log_validator_message(
+            db,
+            direction="response",
+            endpoint=request.url.path,
+            method=request.method,
+            signature=response_sig.signature,
+            nonce=response_sig.nonce,
+            request_id=request_id,
+            payload=log_payload,
+            status_code=status.HTTP_200_OK,
+        )
+        return response
+
+    if not payload.question_scores:
+        await _log_error_response(
+            request,
+            db,
+            status.HTTP_400_BAD_REQUEST,
+            "No question scores provided",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No question scores provided",
+        )
+
     pre_scored_batch_challenge_ids = set(
         (
             await db.execute(
@@ -1094,13 +1341,6 @@ async def score_challenges(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=detail,
         )
-    assignment_result = await db.execute(
-        select(BatchAssignment)
-        .where(BatchAssignment.challenge_batch_fk == batch_entry.id)
-        .where(BatchAssignment.validator_fk == validator.id)
-        .where(BatchAssignment.done_at.is_(None))
-    )
-    assignment = assignment_result.scalars().first()
     if assignment is None:
         await _log_error_response(
             request,
