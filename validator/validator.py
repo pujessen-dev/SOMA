@@ -19,6 +19,7 @@ from soma_shared.contracts.validator.v1.messages import (
     HeartbeatResponse,
     PostChallengeScores,
     PostChallengeScoresResponse,
+    ScoreSubmissionType,
     ValidatorRegisterRequest,
     ValidatorRegisterResponse,
     GetBestMinersUidRequest,
@@ -33,7 +34,7 @@ import logging
 import httpx
 from soma_shared.utils.signer import sign_payload_model, generate_nonce
 from validator.chain.weigt_setter import WeightSetter
-from validator.evaluation.evaluator import Evaluator
+from validator.evaluation.evaluator import BatchScoringError, Evaluator
 from validator.evaluation.llm_scorer import LLMClient, LLMInsufficientFundsError
 from soma_shared.utils.verifier import verify_httpx_response
 import bittensor as bt
@@ -57,6 +58,7 @@ class Validator(AbstractValidator):
         self.settings = self.init_settings()
         self.verify_openrouter_startup()
         self._last_fetch_cause = "unknown"
+        self._provider_degraded_until = 0.0
         self.evaluator = Evaluator(settings=self.settings)
         self.weight_setter = WeightSetter(
             netuid=self.settings.netuid, subtensor=self.settings.subtensor
@@ -491,6 +493,60 @@ class Validator(AbstractValidator):
         except Exception as e:
             logging.error(f"Exception during reporting results: {e}", exc_info=True)
 
+    async def report_batch_error(
+        self,
+        task: GetChallengesResponse,
+        *,
+        error_code: str,
+        error_message: str,
+        error_details: dict | None = None,
+        retryable: bool = True,
+    ) -> None:
+        try:
+            payload = PostChallengeScores(
+                batch_id=task.batch_id,
+                question_scores=[],
+                submission_type=ScoreSubmissionType.ERROR,
+                error_code=error_code,
+                error_message=error_message,
+                error_details=error_details,
+                retryable=retryable,
+            )
+            nonce = generate_nonce()
+            signature = sign_payload_model(
+                payload=payload, nonce=nonce, wallet=self.settings.wallet
+            )
+            signed_payload = SignedEnvelope(payload=payload, sig=signature)
+            logging.warning(
+                "Reporting batch error for batch_id=%s code=%s retryable=%s",
+                task.batch_id,
+                error_code,
+                retryable,
+            )
+            response = await self.client.post(
+                f"{self.settings.platform_url}/validator/score_challenges",
+                json=signed_payload.model_dump(),
+            )
+            response.raise_for_status()
+            verify_httpx_response(
+                response,
+                PostChallengeScoresResponse,
+                expected_key=self.settings.platform_signer_ss58,
+            )
+            logging.info(
+                "Successfully reported batch error for batch_id=%s code=%s",
+                task.batch_id,
+                error_code,
+            )
+        except Exception as exc:
+            logging.error(
+                "Failed to report batch error for batch_id=%s code=%s: %s",
+                getattr(task, "batch_id", "unknown"),
+                error_code,
+                exc,
+                exc_info=True,
+            )
+
     def has_eval_capacity(self) -> bool:
         return self.evaluator.has_eval_capacity()
 
@@ -518,11 +574,35 @@ class Validator(AbstractValidator):
                 if results:
                     logging.info(f"Reporting results for task {task.batch_id}")
                     await self.report_results(task, results)
-
+            except BatchScoringError as exc:
+                await self.report_batch_error(
+                    task,
+                    error_code=exc.error_code,
+                    error_message=str(exc),
+                    error_details=exc.details,
+                    retryable=exc.retryable,
+                )
+                if exc.error_code == "provider_insufficient_funds":
+                    cooldown = max(30.0, self.settings.llm_provider_error_cooldown_seconds)
+                    self._provider_degraded_until = max(
+                        self._provider_degraded_until,
+                        time.monotonic() + cooldown,
+                    )
+                    logging.warning(
+                        "Provider degraded mode activated for %.1fs due to insufficient funds",
+                        cooldown,
+                    )
             except Exception as exc:
                 logging.error(
                     f"Failed to process task {getattr(task, 'batch_id', 'unknown')}: {exc}",
                     exc_info=True,
+                )
+                await self.report_batch_error(
+                    task,
+                    error_code="validator_processing_error",
+                    error_message=f"Task processing failed: {exc}",
+                    error_details={"error": str(exc)},
+                    retryable=True,
                 )
 
         try:
@@ -551,13 +631,24 @@ class Validator(AbstractValidator):
                 has = self.has_eval_capacity()
                 max_in_flight = self.settings.max_concurrent_evaluations
                 fetch_due = now >= fetch_cooldown_until
-                can_fetch = has and len(in_flight) < max_in_flight and fetch_due
+                provider_ready = now >= self._provider_degraded_until
+                can_fetch = (
+                    has
+                    and len(in_flight) < max_in_flight
+                    and fetch_due
+                    and provider_ready
+                )
                 cooldown_remaining = max(0.0, fetch_cooldown_until - now)
+                provider_cooldown_remaining = max(
+                    0.0, self._provider_degraded_until - now
+                )
                 logging.info(
                     f"Has evaluation capacity: {has}, in_flight tasks: {len(in_flight)}, "
                     f"max_in_flight: {max_in_flight}, can_fetch: {can_fetch}, "
                     f"ratio_fail_streak: {consecutive_ratio_failures}, "
-                    f"fetch_due: {fetch_due}, cooldown_remaining: {cooldown_remaining:.1f}s"
+                    f"fetch_due: {fetch_due}, cooldown_remaining: {cooldown_remaining:.1f}s, "
+                    f"provider_ready: {provider_ready}, "
+                    f"provider_cooldown_remaining: {provider_cooldown_remaining:.1f}s"
                 )
                 if can_fetch:
                     logging.info("Fetching tasks from platform...")
