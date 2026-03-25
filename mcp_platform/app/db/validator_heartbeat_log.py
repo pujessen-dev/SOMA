@@ -56,18 +56,22 @@ async def log_validator_heartbeat(
                 created_at=now,
                 last_seen_at=now,
                 current_status=status,
+                version=version,
+                code_changed=code_changed,
             )
             session.add(validator)
             await session.flush()
         else:
             validator.last_seen_at = now
             validator.current_status = status
+            if version is not None:
+                validator.version = version
+            if code_changed is not None:
+                validator.code_changed = code_changed
         entry = ValidatorHeartbeat(
             request_fk=request_fk,
             validator_fk=validator.id,
             status=status,
-            version=version,
-            code_changed=code_changed,
         )
         session.add(entry)
         await session.commit()
