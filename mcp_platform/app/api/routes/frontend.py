@@ -60,32 +60,41 @@ async def _log_frontend_request_metrics(request: Request, status_code: int) -> N
     if not request_id:
         return
 
-    payload = {"query": dict(request.query_params)}
-    metrics_snapshot = get_current_db_request_metrics_snapshot()
+    try:
+        payload = {"query": dict(request.query_params)}
+        metrics_snapshot = get_current_db_request_metrics_snapshot()
 
-    async for session in get_db_session():
-        result = await session.execute(
-            select(RequestModel).where(RequestModel.external_request_id == request_id)
-        )
-        request_row = result.scalars().first()
-        if request_row is None:
-            request_row = RequestModel(
-                external_request_id=request_id,
-                endpoint=request.url.path,
-                method=request.method,
-                payload=payload,
-                status_code=status_code,
+        async for session in get_db_session():
+            result = await session.execute(
+                select(RequestModel).where(RequestModel.external_request_id == request_id)
             )
-            session.add(request_row)
-        else:
-            request_row.endpoint = request.url.path
-            request_row.method = request.method
-            request_row.payload = payload
-            request_row.status_code = status_code
+            request_row = result.scalars().first()
+            if request_row is None:
+                request_row = RequestModel(
+                    external_request_id=request_id,
+                    endpoint=request.url.path,
+                    method=request.method,
+                    payload=payload,
+                    status_code=status_code,
+                )
+                session.add(request_row)
+            else:
+                request_row.endpoint = request.url.path
+                request_row.method = request.method
+                request_row.payload = payload
+                request_row.status_code = status_code
 
-        apply_db_metrics_snapshot_to_request(request_row, metrics_snapshot)
-        await session.commit()
-        break
+            apply_db_metrics_snapshot_to_request(request_row, metrics_snapshot)
+            await session.commit()
+            break
+    except Exception:
+        logger.exception(
+            "Failed to log frontend request metrics",
+            extra={
+                "request_id": request_id,
+                "status_code": status_code,
+            },
+        )
 
 
 class FrontendMetricsRoute(APIRoute):
