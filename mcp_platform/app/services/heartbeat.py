@@ -19,8 +19,8 @@ from soma_shared.contracts.validator.v1.messages import (
     HeartbeatRequest,
     HeartbeatResponse,
 )
-from soma_shared.db.session import get_db_session
 from soma_shared.db.session import (
+    get_db_session,
     begin_db_request_metrics_scope,
     end_db_request_metrics_scope,
 )
