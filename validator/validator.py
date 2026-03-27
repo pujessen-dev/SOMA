@@ -793,6 +793,7 @@ def create_app() -> FastAPI:
             server_ts=datetime.now(timezone.utc),
             version=version_check(),
             code_changed=is_code_changed(),
+            model=validator.settings.openrouter_model,
         )
         nonce = generate_nonce()
         signature = sign_payload_model(
