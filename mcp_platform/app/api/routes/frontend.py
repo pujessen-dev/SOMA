@@ -574,7 +574,7 @@ async def get_miner_by_competition(
             registered_at=miner.created_at if miner else None,
             contests=1,
             status=miner_st,
-            total_score=float(row.total_score) if row.total_score is not None and show_score else None,
+            total_score=float(row.total_score) if (row.total_score is not None and show_score) and eval_started else None,
         ),
         last_contest=last_contest,
         source_code=SourceCodeSummary(available=False, code=None),
@@ -771,9 +771,9 @@ async def get_miner_competition(
     comp_row = (
         await db.execute(
             select(
-                Competition.name.label("competition_name"),
-                Competition.eval_starts_at,
-            ).where(Competition.id == comp_id)
+                V_ACTIVE_COMPETITION.c.competition_name,
+                V_ACTIVE_COMPETITION.c.eval_starts_at,
+            ).where(V_ACTIVE_COMPETITION.c.competition_id == comp_id)
         )
     ).first()
 
@@ -787,6 +787,18 @@ async def get_miner_competition(
     if eval_starts_at is not None and eval_starts_at.tzinfo is None:
         eval_starts_at = eval_starts_at.replace(tzinfo=timezone.utc)
     eval_started = eval_starts_at is not None and datetime.now(timezone.utc) >= eval_starts_at
+
+    # Don't return data if evaluation hasn't started yet
+    if not eval_started:
+        response = ContestSummary(
+            id=comp_id,
+            name=f"{comp_row.competition_name} #{comp_id}",
+            date=None,
+            score=None,
+            rank=None,
+        )
+        await _cache.set(cache_key, response, ttl=15)
+        return response
 
     row = (
         await db.execute(
