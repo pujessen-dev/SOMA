@@ -12,7 +12,14 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
-from soma_shared.db.session import init_db, close_db, get_db_session, clear_db
+from soma_shared.db.session import (
+    begin_db_request_metrics_scope,
+    clear_db,
+    close_db,
+    end_db_request_metrics_scope,
+    get_db_session,
+    init_db,
+)
 from app.db.mock_data import seed_debug_data
 from soma_shared.db.models.validator import Validator
 from soma_shared.db.models.validator_registration import ValidatorRegistration
@@ -23,6 +30,7 @@ from app.services.batch_cleanup import (
     start_batch_cleanup_task,
     stop_batch_cleanup_task,
 )
+from app.services.mv_refresh import start_mv_refresh_task, stop_mv_refresh_task
 from app.services.metagraph import MetagraphService
 from app.services.metagraph_runner import MetagraphServiceRunner
 
@@ -296,6 +304,11 @@ def create_app() -> FastAPI:
         except BaseException as exc:
             _log_startup_failure("batch_cleanup_start", exc)
             raise
+        try:
+            start_mv_refresh_task(app)
+        except BaseException as exc:
+            _log_startup_failure("mv_refresh_start", exc)
+            raise
         logger.info("startup_complete", extra={"env": settings.app_env})
 
     @app.on_event("shutdown")
@@ -318,6 +331,7 @@ def create_app() -> FastAPI:
 
         stop_heartbeat_thread(app)
         await stop_batch_cleanup_task(app)
+        await stop_mv_refresh_task(app)
         await close_db()
         logger.info("shutdown_complete")
 
@@ -326,7 +340,11 @@ def create_app() -> FastAPI:
         # Stateless-friendly: no session, just request-scoped metadata if needed
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
         request.state.request_id = request_id
-        response = await call_next(request)
+        metrics_token = begin_db_request_metrics_scope()
+        try:
+            response = await call_next(request)
+        finally:
+            end_db_request_metrics_scope(metrics_token)
         response.headers["X-Request-ID"] = request_id
         return response
 

@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from functools import lru_cache
-import bittensor as bt
 import tiktoken
 
-from fastapi import APIRouter, HTTPException, status, Request
+from fastapi import HTTPException, status, Request
 from sqlalchemy import func, select, literal, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-import logging
-from soma_shared.contracts.validator.v1.messages import Challenge
+import ipaddress
 from soma_shared.db.models.batch_assignment import BatchAssignment
 from soma_shared.db.models.batch_challenge import BatchChallenge
 from soma_shared.db.models.batch_challenge_score import BatchChallengeScore
@@ -23,25 +21,18 @@ from soma_shared.db.models.request import Request as RequestModel
 from soma_shared.db.models.competition import Competition
 from soma_shared.db.models.competition_config import CompetitionConfig
 from soma_shared.db.models.competition_challenge import CompetitionChallenge
-from soma_shared.db.models.competition_timeframe import CompetitionTimeframe
 from soma_shared.db.models.compression_competition_config import (
     CompressionCompetitionConfig,
 )
 from soma_shared.db.models.burn_request import BurnRequest
-from soma_shared.db.models.screener import Screener
-from soma_shared.db.models.screening_challenge import ScreeningChallenge
 from soma_shared.db.validator_log import log_validator_message
-from app.db.views import (
-    V_ACTIVE_COMPETITION,
-    V_MINER_SCREENER_ELIGIBLE_RANKED,
-    V_SCREENER_CHALLENGES_ACTIVE,
-)
+from app.db.views import V_ACTIVE_COMPETITION, V_COMPETITION_CHALLENGES, V_MINER_SCREENER_ELIGIBLE_RANKED
 from app.core.config import settings
 from app.api.deps import get_script_storage
 from app.core.logging import get_logger
+import math
 
 logger = get_logger(__name__)
-router = APIRouter(tags=["validator"])
 TOKENIZER_CHEATING_CHARS_PER_TOKEN_THRESHOLD = 1.3
 
 
@@ -75,6 +66,166 @@ def _is_chars_per_token_outlier(
     chars_per_token_ratio = compressed_chars_per_token / original_chars_per_token
     return chars_per_token_ratio > threshold
 
+def _extract_client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        # X-Forwarded-For can contain multiple IPs; take the first hop.
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return None
+
+
+def _is_trusted_proxy(request: Request) -> bool:
+    client_host = request.client.host if request.client else None
+    if not client_host:
+        return False
+    try:
+        ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        return False
+    for cidr in settings.trusted_proxy_cidrs:
+        try:
+            if ip in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _is_private_client_ip(client_ip: str | None) -> bool:
+    if not client_ip:
+        return False
+    try:
+        ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    for cidr in settings.private_network_cidrs:
+        try:
+            if ip in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+async def _require_private_network(request: Request) -> None:
+    if not _is_trusted_proxy(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Private network access only",
+        )
+    client_ip = _extract_client_ip(request)
+    if not _is_private_client_ip(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Private network access only",
+        )
+
+def _miner_status(
+    competition_challenges: int | None,
+    screener_challenges: int | None,
+    pending_assignments_competition: int | None,
+    pending_assignments_screener: int | None,
+    scored_screened_challenges: int | None,
+    scored_competition_challanges: int | None,
+    is_in_top_screener: bool = False,
+    has_script: bool = False,
+    miner_banned_status: bool = False,
+) -> str:
+    """Determine miner status based on assigned challenges, scores, and role.
+
+    Args:
+        competition_challenges: Total number of active competition challenges
+            for which this miner could receive scores, or None if unknown.
+        screener_challenges: Total number of screener challenges assigned to
+            this miner, or None if the miner has no screener role/assignments.
+        pending_assignments_competition: Number of pending competition
+            assignments (unscored competition challenges) for this miner, or
+            None if not applicable.
+        pending_assignments_screener: Number of pending screener assignments
+            (unscored screener challenges) for this miner, or None if not
+            applicable.
+        scored_screened_challenges: Number of screener challenges that have
+            been scored for this miner, or None if screener scoring does not
+            apply.
+        scored_competition_challanges: Number of competition challenges that
+            have been scored for this miner, or None if competition scoring
+            does not apply.
+        is_in_top_screener: Whether this miner is in the top screener set for
+            the current competition.
+        has_script: Whether the miner has uploaded a script for the active
+            competition.
+        miner_banned_status: Whether the miner is currently banned from
+            participating in the competition.
+
+    Returns:
+        One of:
+            - 'banned': Miner is banned from participating.
+            - 'idle': Miner has not uploaded a script.
+            - 'scored': All competition challenges have been scored for this
+              miner.
+            - 'evaluating': The miner has competition challenges that are
+              pending scoring.
+            - 'screening': The miner is actively screening challenges (has
+              pending or partially scored screener assignments).
+            - 'qualified': The miner has completed screener challenges, is in
+              the top screener set, and has no competition work in progress.
+            - 'not qualified': The miner has completed screener challenges but
+              is not in the top screener set.
+            - 'in queue': Miner has uploaded a script but has no active
+              competition or screener work in progress.
+    """
+    if miner_banned_status:
+        return "banned"
+
+    if not has_script:
+        return "idle"
+
+    if competition_challenges is not None and scored_competition_challanges is not None:
+        if scored_competition_challanges >= competition_challenges:
+            return "scored"
+        elif (
+            scored_competition_challanges > 0
+            and scored_competition_challanges < competition_challenges
+        ):
+            return "evaluating"
+
+    if pending_assignments_screener is not None and pending_assignments_screener > 0:
+        return "screening"
+    # Only check screener status if miner actually has screener challenges assigned
+    if (
+        screener_challenges is not None
+        and screener_challenges > 0
+        and scored_screened_challenges is not None
+    ):
+        if scored_screened_challenges < screener_challenges:
+            return "screening"
+        elif (
+            scored_screened_challenges >= screener_challenges
+            and is_in_top_screener
+            and (
+                pending_assignments_competition is None
+                or pending_assignments_competition == 0
+            )
+            and (
+                scored_competition_challanges is None
+                or scored_competition_challanges == 0
+            )
+        ):
+            return "qualified"
+        elif (
+            scored_screened_challenges >= screener_challenges and not is_in_top_screener
+        ):
+            return "not qualified"
+
+    if (
+        pending_assignments_competition is not None
+        and pending_assignments_competition > 0
+    ):
+        return "evaluating"
+
+    return "in queue"
 
 def _is_compressed_enough(
     original: str,
@@ -176,17 +327,10 @@ async def _get_competition_phase(
     timeframe_row = (
         await db.execute(
             select(
-                CompetitionTimeframe.eval_starts_at,
-                CompetitionTimeframe.eval_ends_at,
-            )
-            .select_from(V_ACTIVE_COMPETITION)
-            .join(
-                CompetitionTimeframe,
-                CompetitionTimeframe.competition_config_fk
-                == V_ACTIVE_COMPETITION.c.competition_config_id,
+                V_ACTIVE_COMPETITION.c.eval_starts_at,
+                V_ACTIVE_COMPETITION.c.eval_ends_at,
             )
             .where(V_ACTIVE_COMPETITION.c.competition_id == competition_id)
-            .order_by(CompetitionTimeframe.created_at.desc())
             .limit(1)
         )
     ).first()
@@ -208,10 +352,11 @@ async def _get_screener_challenges(
 ):
     screener_challenges = (
         select(
-            V_SCREENER_CHALLENGES_ACTIVE.c.challenge_id.label("challenge_fk"),
+            V_COMPETITION_CHALLENGES.c.challenge_id.label("challenge_fk"),
         )
-        .select_from(V_SCREENER_CHALLENGES_ACTIVE)
-        .where(V_SCREENER_CHALLENGES_ACTIVE.c.competition_id == competition_id)
+        .select_from(V_COMPETITION_CHALLENGES)
+        .where(V_COMPETITION_CHALLENGES.c.competition_id == competition_id)
+        .where(V_COMPETITION_CHALLENGES.c.is_screener.is_(True))
         .subquery()
     )
     screener_challenges_count = await db.scalar(
@@ -432,108 +577,31 @@ async def _get_screener_backlog_count(
     return int(backlog_count or 0)
 
 
-def _get_top_screener_fraction() -> float:
-    return float(getattr(settings, "top_screener_scripts", 0.0))
-
-
-def _get_screener_extra_miners_limit() -> int:
-    raw = int(getattr(settings, "screener_extra_miners_limit", 0) or 0)
-    return max(0, raw)
-
-
-def _get_screener_extra_score_points() -> float:
-    raw = float(getattr(settings, "screener_extra_score_points", 0.0) or 0.0)
-    return max(0.0, raw)
-
-
-def _build_ranked_screener_pool_subq(competition_id: int):
-    return (
-        select(
-            V_MINER_SCREENER_ELIGIBLE_RANKED.c.miner_id.label("miner_id"),
-            V_MINER_SCREENER_ELIGIBLE_RANKED.c.script_id.label("script_id"),
-            V_MINER_SCREENER_ELIGIBLE_RANKED.c.avg_score.label("avg_score"),
-            V_MINER_SCREENER_ELIGIBLE_RANKED.c.rank.label("rank"),
-            V_MINER_SCREENER_ELIGIBLE_RANKED.c.total_eligible.label("total_eligible"),
+async def _build_top_screener_scripts_subq(
+    db: AsyncSession,
+    competition_id: int,
+    top_fraction: float,
+):
+    # V_MINER_SCREENER_ELIGIBLE_RANKED already aggregates, filters eligible scripts
+    # and computes rank/total_eligible — no need to re-aggregate raw tables.
+    row = (
+        await db.execute(
+            select(V_MINER_SCREENER_ELIGIBLE_RANKED.c.total_eligible)
+            .where(V_MINER_SCREENER_ELIGIBLE_RANKED.c.competition_id == competition_id)
+            .limit(1)
         )
+    ).first()
+    if not row or not row.total_eligible:
+        return None
+    top_limit = int(math.ceil(int(row.total_eligible) * top_fraction))
+    if top_limit <= 0:
+        return None
+    return (
+        select(V_MINER_SCREENER_ELIGIBLE_RANKED.c.script_id.label("script_fk"))
         .where(V_MINER_SCREENER_ELIGIBLE_RANKED.c.competition_id == competition_id)
+        .where(V_MINER_SCREENER_ELIGIBLE_RANKED.c.rank <= top_limit)
         .subquery()
     )
-
-
-def _build_top_screener_ranked_subq(
-    competition_id: int,
-    *,
-    top_fraction: float | None = None,
-):
-    fraction = _get_top_screener_fraction() if top_fraction is None else float(top_fraction)
-    if fraction <= 0:
-        return None
-
-    ranked_pool = _build_ranked_screener_pool_subq(competition_id)
-    top_rank_threshold = func.greatest(
-        1,
-        func.cast(
-            func.ceil(
-                func.cast(ranked_pool.c.total_eligible, literal(1.0).type) * fraction
-            ),
-            literal(1).type,
-        ),
-    )
-    base_top = select(
-        ranked_pool.c.miner_id.label("miner_id"),
-        ranked_pool.c.script_id.label("script_id"),
-        ranked_pool.c.rank.label("rank"),
-        ranked_pool.c.total_eligible.label("total_eligible"),
-    ).where(ranked_pool.c.rank <= top_rank_threshold)
-
-    extra_limit = _get_screener_extra_miners_limit()
-    extra_score_points = _get_screener_extra_score_points()
-    if extra_limit <= 0 or extra_score_points <= 0:
-        return base_top.subquery()
-
-    best_score_subq = select(func.max(ranked_pool.c.avg_score)).scalar_subquery()
-    extra_candidates = (
-        select(
-            ranked_pool.c.miner_id.label("miner_id"),
-            ranked_pool.c.script_id.label("script_id"),
-            ranked_pool.c.rank.label("rank"),
-            ranked_pool.c.total_eligible.label("total_eligible"),
-        )
-        .where(ranked_pool.c.rank > top_rank_threshold)
-        .where(ranked_pool.c.avg_score.isnot(None))
-        .where(ranked_pool.c.avg_score >= (best_score_subq - literal(extra_score_points)))
-        .order_by(ranked_pool.c.rank.asc())
-        .limit(extra_limit)
-    )
-    return base_top.union_all(extra_candidates).subquery()
-
-
-def _build_top_screener_scripts_subq(
-    competition_id: int,
-    *,
-    top_fraction: float | None = None,
-):
-    ranked_top = _build_top_screener_ranked_subq(
-        competition_id,
-        top_fraction=top_fraction,
-    )
-    if ranked_top is None:
-        return None
-    return select(ranked_top.c.script_id.label("script_fk")).subquery()
-
-
-def _build_top_screener_miners_subq(
-    competition_id: int,
-    *,
-    top_fraction: float | None = None,
-):
-    ranked_top = _build_top_screener_ranked_subq(
-        competition_id,
-        top_fraction=top_fraction,
-    )
-    if ranked_top is None:
-        return None
-    return select(ranked_top.c.miner_id.label("miner_fk")).subquery()
 
 
 async def _get_expected_competition_pairs(
@@ -542,13 +610,11 @@ async def _get_expected_competition_pairs(
     ratio_count: int,
 ) -> int:
     active_challenge_count = await db.scalar(
-        select(func.count(Challenge.id))
-        .join(
-            CompetitionChallenge,
-            CompetitionChallenge.challenge_fk == Challenge.id,
-        )
-        .where(CompetitionChallenge.competition_fk == competition_id)
-        .where(CompetitionChallenge.is_active.is_(True))
+        select(func.count())
+        .select_from(V_COMPETITION_CHALLENGES)
+        .where(V_COMPETITION_CHALLENGES.c.competition_id == competition_id)
+        .where(V_COMPETITION_CHALLENGES.c.is_active.is_(True))
+        .where(V_COMPETITION_CHALLENGES.c.is_screener.is_(False))
     )
     active_challenge_count = int(active_challenge_count or 0)
     return active_challenge_count * ratio_count
@@ -619,9 +685,10 @@ async def _select_miner_ss58(
                     "_select_miner_ss58: No screener challenges found for evaluation"
                 )
                 return None, None
-            top_scripts_subq = _build_top_screener_scripts_subq(
+            top_scripts_subq = await _build_top_screener_scripts_subq(
+                db,
                 active_competition_id,
-                top_fraction=top_fraction,
+                top_fraction,
             )
             if top_scripts_subq is None:
                 logger.info(
